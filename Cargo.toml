@@ -1,0 +1,16 @@
+[package]
+name = "millegrilles_filemanager_rust"
+version = "2026.7.0"
+edition = "2024"
+
+[dependencies]
+millegrilles_common_rust = { git = "https://github.com/dugrema/millegrilles_common_rust.git", tag = "2026.6-release" }
+# millegrilles_common_rust = { git = "https://github.com/dugrema/millegrilles_common_rust.git", branch = "master" }
+# millegrilles_common_rust = { path = "/home/mathieu/RustroverProjects/millegrilles_common_rust" }
+
+serde = { version = "1.0.229", features = ["derive"] }
+
+# CLI parsing for restore
+clap = "4.6.7"
+clap_derive = "4.6.7"
+rpassword = "7.5.4"

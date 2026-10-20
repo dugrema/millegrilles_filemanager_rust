@@ -1,0 +1,62 @@
+include:
+  - path: ../include/app_net.yml
+    project_directory: .
+
+name: ${INSTANCE_NAME}
+
+services:
+  filemanager:
+    image: "replace_me"
+    user: "${CONTAINER_UID}:${CONTAINER_GID}"
+    x-millegrilles-certificat:
+      roles:
+        - filemanager
+        - grosfichiers
+      exchanges:
+        - 4.secure
+        - 3.protege
+        - 2.prive
+        - 1.public
+      domaines:
+        - FileManager
+        - GrosFichiers
+    environment:
+      - INSTANCE_ID=${INSTANCE_ID}
+      - MG_MQ_HOST=${MQ_HOSTNAME:-mq}
+      - MG_MQ_PORT=${MQ_PORT:-5673}
+      - MG_MONGO_HOST=mongo
+      - KEYFILE=/run/secrets/key_cert.pem
+      - CAFILE=/run/secrets/millegrille.cert.pem
+      - MG_REDIS_URL=rediss://client_rust@redis:6379#insecure
+      - MG_REDIS_PASSWORD_FILE=/run/secrets/redis.txt
+      - RUST_LOG=error,millegrilles_common_rust=warn,millegrilles_filemanager_rust=info
+    volumes:
+      - ${MILLEGRILLES_ROOT}/var/backup/domains:/var/opt/millegrilles/archives
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 250M
+      restart_policy:
+        condition: any
+        delay: 20s
+    configs:
+      - source: mgca
+        target: /run/secrets/millegrille.cert.pem
+    secrets:
+      - source: filemanager
+        target: key_cert.pem
+      - source: passwd_redis
+        target: redis.txt
+    networks:
+      - app_net
+
+configs:
+  mgca:
+    file: ${MILLEGRILLES_ROOT}/etc/millegrille.pem
+
+secrets:
+  filemanager:
+    file: ${MILLEGRILLES_ROOT}/secrets/filemanager.pem
+  passwd_redis:
+    file: ${MILLEGRILLES_ROOT}/secrets/redis.txt

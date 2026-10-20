@@ -1,0 +1,8 @@
+{
+  "name": "filemanager",
+  "version": "BUILD",
+  "labels": {
+    "en": "File manager for MilleGrilles",
+    "fr": "Gestionnaire de fichiers pour MilleGrilles"
+  }
+}
