@@ -6,16 +6,14 @@ ARG APT_PROXY
 ARG CARGO_REGISTRY_URL
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN if [ -n "$APT_PROXY" ]; then \
          echo "Acquire::http::Proxy \"$APT_PROXY\";" > /etc/apt/apt.conf.d/01proxy; \
-    fi \
-    && apt-get update && apt-get install -y \
+    fi && \
+    if [ -n "$CARGO_REGISTRY_URL" ]; then \
+        mkdir -p .cargo && \
+        echo -e "[registries.crates-io]\nreplace-with = \"nexus\"\n[registries.nexus]\nindex = \"$CARGO_REGISTRY_URL\"" > .cargo/config.toml.test \
+    fi && \
+    apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
