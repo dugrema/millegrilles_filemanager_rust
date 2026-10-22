@@ -41,7 +41,7 @@ archive-build:
 package: docker-build archive-build
 
 deploy: package
-	echo "echo $(NEXUS_PASS)" | docker login ${DOCKER_REGISTRY_URL} -u $(NEXUS_USER) --password-stdin
+	echo "$(NEXUS_PASS)" | docker login ${DOCKER_REGISTRY_URL} -u $(NEXUS_USER) --password-stdin
 	docker push $(DOCKER_IMAGE):$(VBUILD)
 	echo "Pushing catalogue information to ${DEPLOY_RSYNC_WEBAPP_DEST}/$(NOM_APP)"
 	rsync target/release/$(CATALOGUE_ARCHIVE_NAME) ${DEPLOY_RSYNC_WEBAPP_DEST}/$(NOM_APP)
