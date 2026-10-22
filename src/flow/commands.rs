@@ -41,35 +41,3 @@ pub async fn process_command<M, E>(
     }
 }
 
-/// Process the command part of the transaction (checks, validations, volatile updates),
-/// calls transaction processor and then handles responses and emits events.
-pub async fn process_transaction<M,E>(
-    config: &dyn ConfigService,
-    mongo: &M,
-    outbound: &MessageOutboundFacade,
-    encryption: &E,
-    transaction: &FileManagerTransactionService,
-    wrapper: MessageValidated
-) -> Result<(), CommonError> where M: MongoDaoTyped, E: DocumentEncryptionService
-{
-    let action = match wrapper.get_routing_action() {
-        Some(action) => action,
-        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err("No action provided in transaction")).await
-    };
-
-    match wrapper.message.kind {
-        MessageKind::Commande => {
-            match action {
-                // TRANSACTION_INSCRIRE_USAGER => register_user(mongo, outbound, transaction, wrapper).await,
-                _ => {
-                    info!("Unknown action {} for process_transaction, skipping", action);
-                    Ok(())
-                }
-            }
-        },
-        _ => {
-            info!("Unhandled message type with action {} for process_command, skipping", action);
-            Ok(())
-        }
-    }
-}

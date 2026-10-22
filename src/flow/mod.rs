@@ -6,3 +6,4 @@ mod events;
 mod maintenance;
 mod requests;
 pub mod restore;
+mod transaction_commands;
