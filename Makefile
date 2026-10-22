@@ -9,6 +9,9 @@ CATALOGUE_ARCHIVE_NAME=$(NOM_APP).$(VBUILD).tar.gz
 STAGING_DIR=package_staging
 APT_PROXY ?=
 CARGO_REGISTRY_URL ?=
+DOCKER_REGISTRY_URL ?=
+NEXUS_USER ?=
+NEXUS_PASS ?=
 
 .PHONY: all build docker-build deploy clean package
 
@@ -38,6 +41,7 @@ archive-build:
 package: docker-build archive-build
 
 deploy: package
+	echo "echo $(NEXUS_PASS)" | docker login ${DOCKER_REGISTRY_URL} -u $(NEXUS_USER) --password-stdin
 	docker push $(DOCKER_IMAGE):$(VBUILD)
 	echo "Pushing catalogue information to ${DEPLOY_RSYNC_WEBAPP_DEST}/$(NOM_APP)"
 	rsync target/release/$(CATALOGUE_ARCHIVE_NAME) ${DEPLOY_RSYNC_WEBAPP_DEST}/$(NOM_APP)

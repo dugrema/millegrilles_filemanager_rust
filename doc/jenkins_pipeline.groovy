@@ -24,7 +24,13 @@ pipeline {
 
         stage('Build & Package & Deploy') {
             steps {
-                sh "make deploy"
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-jenkins',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASS'
+                )]) {
+                    sh "make deploy"
+                }
             }
         }
 
