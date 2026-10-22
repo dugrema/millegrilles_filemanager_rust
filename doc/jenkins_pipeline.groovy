@@ -6,7 +6,7 @@ pipeline {
         string(defaultValue: '2026.6', name: 'VERSION')
         string(defaultValue: 'jenkins-maple', name: 'CREDENTIALS_ID')
         string(defaultValue: 'ssh://git.maple.maceroc.com/git/millegrilles_filemanager_rust', name: 'GIT_URL')
-        string(defaultValue: 'registry.millegrilles.com:5000/millegrilles/filemanager_rust', name: 'DOCKER_IMAGE')
+        string(defaultValue: 'vmhost2.maple.maceroc.com/millegrilles/filemanager_rust', name: 'DOCKER_IMAGE')
     }
 
     environment {
