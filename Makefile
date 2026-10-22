@@ -7,6 +7,8 @@ DOCKER_IMAGE?=registry.millegrilles.com:5000/millegrilles/filemanager_rust
 DOCKER_IMAGE_NO_PORT=$(shell echo $(DOCKER_IMAGE) | sed 's/:[0-9]*//')
 CATALOGUE_ARCHIVE_NAME=$(NOM_APP).$(VBUILD).tar.gz
 STAGING_DIR=package_staging
+APT_PROXY ?=
+CARGO_REGISTRY_URL ?=
 
 .PHONY: all build docker-build deploy clean package
 
@@ -18,7 +20,10 @@ all: package
 # 	gzip -f "target/release/$(NOM_APP)_x86_64"
 
 docker-build:
-	docker build -t $(DOCKER_IMAGE):$(VBUILD) .
+	docker build \
+		--build-arg APT_PROXY=$(APT_PROXY) \
+		--build-arg CARGO_REGISTRY_URL=$(CARGO_REGISTRY_URL) \
+		-t $(DOCKER_IMAGE):$(VBUILD) .
 
 archive-build:
 	rm -rf $(STAGING_DIR)
