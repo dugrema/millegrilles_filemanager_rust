@@ -4,11 +4,11 @@ use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, error};
+use millegrilles_common_rust::tracing::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use crate::external::mongo::*;
-use crate::external::mongo_struct::{ContactRow, NodeFichierRepOwned, RowPartagesUsager};
-use crate::flow::request_models::ResponseFichierRepVersion;
+use crate::external::mongo_struct::{CompleteFileRow, ContactRow, NodeFichierRepOwned, RowPartagesUsager};
+use crate::flow::request_models::{ReponseDocumentsParTuuid, ResponseFichierRepVersion, ResponseVersionCourante};
 
 pub struct UserSharedTuuid {
     pub user_id: String,
@@ -169,11 +169,11 @@ pub async fn get_directory_navigation_headers<M>(
 }
 
 #[derive(Serialize, Deserialize)]
-struct ResultatStatistiquesRow {
+pub struct ResultatStatistiquesRow {
     #[serde(alias="_id")]
-    type_node: String,
-    taille: usize,
-    count: usize,
+    pub type_node: String,
+    pub taille: usize,
+    pub count: usize,
 }
 
 async fn get_directory_statistics(
@@ -213,4 +213,157 @@ async fn get_directory_statistics(
         resultat.push(bson::deserialize_from_document(d?)?);
     }
     Ok(resultat)
+}
+
+/// Fetches complete file content from fichierrep, versions and media. Supports paging.
+pub async fn get_complete_files(
+    mongo: &dyn MongoDao,
+    filtre: Document,
+    changed_since: Option<DateTime<Utc>>,
+    skip_count: Option<i64>,
+    limit_count: Option<i32>
+) -> Result<(ReponseDocumentsParTuuid, bool), CommonError> {
+    let mut pipeline = vec![doc!{"$match": filtre}];
+
+    if limit_count.is_some() || skip_count.is_some() {
+        pipeline.push(doc!{"$sort": {FIELD_DATE_MODIFIED: 1}});  // Need to sort for paging
+    }
+
+    if let Some(skip) = skip_count {
+        pipeline.push(doc! {"$skip": skip});
+    }
+
+    if changed_since.is_none() {
+        // Limit before $lookup
+        if let Some(limit) = limit_count {
+            pipeline.push(doc! {"$limit": &limit});
+        }
+    }
+
+    // Move all content under fichierrep doc for easier mapping to CompleteFileRow
+    pipeline.push(doc!{"$replaceRoot": {"newRoot": {"fichierrep": "$$ROOT"}}});
+
+    // Join version information
+    pipeline.push(doc!{"$lookup": {
+            "from": NOM_COLLECTION_VERSIONS,
+            "localField": "fichierrep.fuuids_versions.0",
+            "foreignField": FIELD_FUUID,
+            "as": "versions",
+        }}
+    );
+    pipeline.push(doc!{"$addFields": {
+        "tuuid": "$fichierrep.tuuid",   // Used for troubleshooting deserialization errors
+        "current_version": {"$arrayElemAt": ["$versions", 0]},
+    }});
+    pipeline.push(doc!{"$unset": "versions"});
+
+    if let Some(changed_since) = changed_since {
+        // Filter on changed date. Use max value for file between fichierrep and versions collections.
+        pipeline.push(doc!{"$addFields": {"changed_since": {"$max": [
+            format!("$fichierrep.{}", FIELD_DATE_MODIFIED),
+            format!("$current_version.{}", FIELD_DATE_MODIFIED)]
+        }}});
+        pipeline.push(doc!{"$match": {"changed_since": {"$gte": changed_since}}});
+        if let Some(limit) = limit_count {
+            // Limit after match
+            pipeline.push(doc! {"$limit": limit});
+        }
+    }
+
+    // Join comments
+    pipeline.push(doc!{"$lookup": {
+            "from": NOM_COLLECTION_FILE_COMMENTS,
+            "localField": "fichierrep.tuuid",
+            "foreignField": FIELD_TUUID,
+            "as": "comments",
+        }}
+    );
+
+    // Add lookup to media content
+    pipeline.push(
+        doc!{"$lookup": {
+            "from": NOM_COLLECTION_MEDIA,
+            "localField": "fichierrep.fuuids_versions.0",
+            "foreignField": FIELD_FUUID,
+            "let": {"user_id": "$fichierrep.user_id"},  // Expose the outer user_id as inner variable $$user_id
+            "pipeline": [{"$match": {"$expr": {"$eq": ["$user_id", "$$user_id"]}}}],        // Second key
+            "as": "media_list",
+        }}
+    );
+    pipeline.push(doc!{"$addFields": {"media": {"$arrayElemAt": ["$media_list", 0]}}});
+    pipeline.push(doc!{"$unset": "media_list"});
+
+    // debug!("get_complete_files Pipeline: {:?}", pipeline);
+    let collection_fichierrep = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+
+    // DEBUG - output to collection
+    // pipeline.push(doc!{"$out": {"db": middleware.get_database()?.name(), "coll": "GrosFichiers/TestSync"}});
+    // collection_fichierrep.aggregate(pipeline, None).await?;
+
+    let mut response = ReponseDocumentsParTuuid { fichiers: Vec::new() };
+    let mut cursor = collection_fichierrep.aggregate(pipeline).await?;
+    while cursor.advance().await? {
+        let row = cursor.deserialize_current()?;
+        let tuuid = row.get_str("tuuid").unwrap_or("UNKNOWN").to_string();
+        let row: CompleteFileRow = match bson::deserialize_from_document(row) {
+            Ok(inner) => inner,
+            Err(e) => {
+                warn!("get_complete_files Deserialization error on tuuid {}: {:?}", tuuid, e);
+                continue    // Skip this entry
+            }
+        };
+
+        let mut fichier_rep: ResponseFichierRepVersion = row.fichierrep.into();
+
+        if let Some(comments) = row.comments {
+            let mapped_comments = comments.into_iter().map(|c| c.into()).collect();
+            fichier_rep.comments = Some(mapped_comments);
+        }
+
+        if let Some(version) = row.current_version {
+            // Map the version to response format
+            let mut version_response = ResponseVersionCourante {
+                fuuid: version.fuuid,
+                mimetype: version.mimetype,
+                taille: version.taille,
+                fuuids_reclames: version.fuuids_reclames,
+                visites: version.visites,
+                derniere_modification: version.derniere_modification,
+                height: None,
+                width: None,
+                duration: None,
+                video_codec: None,
+                anime: None,
+                images: None,
+                video: None,
+                audio: None,
+                subtitles: None,
+                web_subtitles: None,
+                cle_id: version.cle_id,
+                format: version.format,
+                nonce: version.nonce,
+                verification: version.verification,
+            };
+
+            if let Some(media) = row.media {
+                version_response.anime = Some(media.anime);
+                version_response.height = media.height;
+                version_response.width = media.width;
+                version_response.duration = media.duration;
+                version_response.video_codec = media.video_codec;
+                version_response.images = media.images;
+                version_response.video = media.video;
+                version_response.audio = media.audio;
+                version_response.subtitles = media.subtitles;
+                version_response.web_subtitles = media.web_subtitles;
+            }
+
+            fichier_rep.version_courante = Some(version_response);
+        }
+        response.fichiers.push(fichier_rep);
+    }
+
+    let truncated = false;
+
+    Ok((response, truncated))
 }

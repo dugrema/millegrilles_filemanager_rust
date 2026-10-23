@@ -151,3 +151,8 @@ impl From<NodeFichierRepOwned> for ResponseFichierRepVersion {
         }
     }
 }
+
+#[derive(Clone, Serialize)]
+pub struct ReponseDocumentsParTuuid {
+    pub fichiers: Vec<ResponseFichierRepVersion>
+}

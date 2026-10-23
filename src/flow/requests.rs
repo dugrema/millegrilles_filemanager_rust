@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use millegrilles_common_rust::bson::doc;
+use std::collections::{HashMap, HashSet};
+use millegrilles_common_rust::bson::{doc, Document};
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
@@ -17,11 +17,11 @@ use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
 use millegrilles_common_rust::millegrilles_cryptographie::serde_dates::mapstringepochseconds;
 use serde::{Deserialize, Serialize};
-use crate::constants::ROLE_USAGER;
+use crate::constants::{DOMAIN_NAME, ROLE_USAGER};
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{AudioDetail, FileComment, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
 use crate::external::mq::*;
-use crate::flow::directories::get_shared_tuuid;
+use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_shared_tuuid, ResultatStatistiquesRow};
 use crate::flow::request_models::ResponseFichierRepVersion;
 
 pub async fn process_request<M>(
@@ -97,7 +97,7 @@ async fn request_sync_directory<M>(
     if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
     };
-    let (user_id, shared_tuuid) = match request.contact_id {
+    let (user_id, shared_tuuid) = match request.contact_id.clone() {
         None => (user_id, None),
         Some(contact_id) => {
             let cuuid = match request.cuuid.as_ref() {
@@ -148,9 +148,76 @@ async fn request_sync_directory<M>(
     let skip = request.skip.unwrap_or(0);
     let produce_stats = skip == 0 || deleted || request.produce_stats == Some(true);
 
-    todo!();
+    let directory_info = match produce_stats {
+        true => {
+            let shared_collection = request.contact_id.is_some();
+            let info = get_directory_navigation_headers(
+                mongo,
+                user_id.as_str(),
+                filter.clone(),
+                cuuid.as_ref(),
+                last_sync,
+                shared_collection,
+                shared_tuuid,
+                deleted,
+            ).await?;
+            Some(info)
+        },
+        false => None,
+    };
 
-    Ok(())
+    let limit_count = request.limit_count.unwrap_or(100);
+
+    let (result, truncated) = get_complete_files(
+        mongo,
+        filter,
+        last_sync.clone(),
+        Some(skip),
+        Some(limit_count)
+    ).await?;
+    let complete = !truncated && result.fichiers.len() < limit_count as usize;
+
+    let (stats, breadcrumb, deleted_tuuids) = match directory_info {
+        Some(info) => (info.stats, info.breadcrumb, info.deleted_tuuids),
+        None => (None, None, None)
+    };
+
+    let mut sync_response = RequestSyncDirectoryResponseFile {
+        ok: true,
+        cuuid,
+        stats,
+        files: result.fichiers,
+        breadcrumb,
+        deleted_tuuids,
+        keys: None,
+        complete,
+    };
+
+    // Prepare decryption keys for client
+    let mut keys = HashSet::new();
+    for file in &sync_response.files {
+        let file_keys = extract_key_ids_from_file(file)?;
+        keys.extend(file_keys);
+    }
+    if let Some(breadcrumbs) = sync_response.breadcrumb.as_ref() {
+        for breadcrumb in breadcrumbs {
+            let breadcrumb_keys = extract_key_ids_from_file(breadcrumb)?;
+            keys.extend(breadcrumb_keys);
+        }
+    }
+    // Convert &String to String for request.
+    if ! keys.is_empty() {
+        let keys = keys.into_iter().map(|k| k.to_string()).collect();
+        let key_response = outbound.get_keys(DOMAIN_NAME, keys, None).await?;
+        let mut decryption_key_type = Vec::new();
+        for k in key_response {
+            todo!()
+            // decryption_key_type.push(k.into());
+        }
+        sync_response.keys = Some(decryption_key_type);
+    }
+
+    outbound.respond(wrapper.delivery_info, sync_response).await
 }
 
 #[derive(Deserialize)]
@@ -158,14 +225,6 @@ struct RequeteInfoStatistiques {
     /// Collection / repertoire a utiliser comme top de l'arborescence
     cuuid: Option<String>,
     contact_id: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ResultatStatistiquesRow {
-    #[serde(alias="_id")]
-    type_node: String,
-    taille: usize,
-    count: usize,
 }
 
 #[derive(Serialize)]
@@ -207,4 +266,34 @@ async fn request_documents_by_tuuid<M>(
     todo!();
 
     Ok(())
+}
+
+fn extract_key_ids_from_file(r: &ResponseFichierRepVersion) -> Result<Vec<&String>, CommonError> {
+    // Use a set to dedupe key ids.
+    let mut key_ids = HashSet::new();
+
+    let fuuid = match r.fuuids_versions.as_ref() {
+        Some(fuuids) => fuuids.get(0),
+        None => None
+    };
+
+    if let Some(cle_id) = r.cle_id.as_ref() {
+        key_ids.insert(cle_id);
+    }
+    if let Some(cle_id) = r.metadata.cle_id.as_ref() {
+        key_ids.insert(cle_id);
+    } else if let Some(ref_hachage_bytes) = r.metadata.ref_hachage_bytes.as_ref() {
+        // Legacy method to get key id
+        key_ids.insert(ref_hachage_bytes);
+    } else if let Some(fuuid) = fuuid.as_ref() {
+        // Legacy method to get key id
+        key_ids.insert(fuuid);
+    }
+    if let Some(version) = r.version_courante.as_ref() {
+        if let Some(cle_id) = version.cle_id.as_ref() {
+            key_ids.insert(cle_id);
+        }
+    }
+
+    Ok(key_ids.into_iter().collect())
 }
