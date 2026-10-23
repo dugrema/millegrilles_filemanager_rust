@@ -115,22 +115,22 @@ async fn request_sync_directory<M>(
     let cuuid = request.cuuid.clone();
     let filter = match deleted {
         false => match cuuid.as_ref() {
-            Some(cuuid) => doc!{FIELD_PATH_CUUIDS_0: cuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: false},
-            None => doc!{FIELD_PATH_CUUIDS: {"$exists": false}, FIELD_USER_ID: &user_id, FIELD_DELETED: false}
+            Some(cuuid) => doc!{ FIELD_PATH_CUUIDS_0: cuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: false },
+            None => doc!{ FIELD_PATH_CUUIDS: None::<&str>, FIELD_USER_ID: &user_id, FIELD_DELETED: false }
         },
         true => match cuuid.as_ref() {
             Some(cuuid) => doc!{
                 FIELD_PATH_CUUIDS_0: cuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: true,
                 "$or": [
-                    {FIELD_NODE_TYPE: VALUE_NODE_TYPE_FICHIER, FIELD_FUUIDS_VERSION_0: {"$exists": true}},  // File has not been permanently deleted
-                    {FIELD_NODE_TYPE: {"$ne": VALUE_NODE_TYPE_FICHIER}},                                    // Directory or Collection
+                    { FIELD_NODE_TYPE: VALUE_NODE_TYPE_FICHIER, FIELD_FUUIDS_VERSION_0: {"$exists": true} },  // File has not been permanently deleted
+                    { FIELD_NODE_TYPE: {"$ne": VALUE_NODE_TYPE_FICHIER} },                                    // Directory or Collection
                 ]
             },
             None => doc!{
                 FIELD_USER_ID: &user_id, FIELD_DELETED: true, FIELD_DELETED_INDIRECT: false,
                 "$or": [
-                    {FIELD_NODE_TYPE: VALUE_NODE_TYPE_FICHIER, FIELD_FUUIDS_VERSION_0: {"$exists": true}},  // File has not been permanently deleted
-                    {FIELD_NODE_TYPE: {"$ne": VALUE_NODE_TYPE_FICHIER}},                                    // Directory or Collection
+                    { FIELD_NODE_TYPE: VALUE_NODE_TYPE_FICHIER, FIELD_FUUIDS_VERSION_0: {"$exists": true} },  // File has not been permanently deleted
+                    { FIELD_NODE_TYPE: {"$ne": VALUE_NODE_TYPE_FICHIER} },                                    // Directory or Collection
                 ]
             }
         }
@@ -149,6 +149,7 @@ async fn request_sync_directory<M>(
     let skip = request.skip.unwrap_or(0);
     let produce_stats = skip == 0 || deleted || request.produce_stats == Some(true);
 
+    debug!("Produce directory stats");
     let directory_info = match produce_stats {
         true => {
             let shared_collection = request.contact_id.is_some();

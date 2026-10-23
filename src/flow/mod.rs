@@ -10,5 +10,5 @@ mod transaction_commands;
 mod directories;
 mod request_models;
 mod keys;
-mod transaction_models;
+pub mod transaction_models;
 pub mod file_events;

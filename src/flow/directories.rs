@@ -1,4 +1,4 @@
-use millegrilles_common_rust::bson;
+use millegrilles_common_rust::{bson, serde_json};
 use millegrilles_common_rust::bson::{doc, Document};
 use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::error::Error as CommonError;
@@ -199,12 +199,14 @@ async fn get_directory_statistics(
         }},
         doc! { "$replaceRoot": { "newRoot": {"$mergeObjects": [ {"$arrayElemAt": ["$versions", 0] }, "$$ROOT" ]}}},
         doc! { "$group": {
-                "_id": "$type_node",
+                "_id": "$node_type",
                 "taille": {"$sum": "$taille"},
                 "count": {"$count": {}},
             }
         }
     ];
+
+    debug!("Directory statistics pipeline: {:?}", pipeline);
 
     let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
     let mut cursor = collection.aggregate(pipeline).await?;
@@ -212,6 +214,7 @@ async fn get_directory_statistics(
     while let Some(d) = cursor.next().await {
         resultat.push(bson::deserialize_from_document(d?)?);
     }
+    debug!("Directory stats results:\n{}", serde_json::to_string(&resultat)?);
     Ok(resultat)
 }
 
@@ -293,7 +296,7 @@ pub async fn get_complete_files(
     pipeline.push(doc!{"$addFields": {"media": {"$arrayElemAt": ["$media_list", 0]}}});
     pipeline.push(doc!{"$unset": "media_list"});
 
-    // debug!("get_complete_files Pipeline: {:?}", pipeline);
+    debug!("get_complete_files Pipeline: {:?}", pipeline);
     let collection_fichierrep = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
 
     // DEBUG - output to collection
@@ -366,4 +369,36 @@ pub async fn get_complete_files(
     let truncated = false;
 
     Ok((response, truncated))
+}
+
+#[derive(Deserialize)]
+pub struct RowRepertoirePaths {
+    pub path_cuuids: Option<Vec<String>>,
+}
+
+pub async fn get_path_cuuid(
+    mongo: &dyn MongoDao,
+    cuuid: &str
+) -> Result<Option<Vec<String>>, CommonError> {
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre = doc! { CHAMP_TUUID: cuuid };
+    let doc_parent: RowRepertoirePaths = match collection
+        .find_one(filtre)
+        .projection(doc!{CHAMP_TUUID: 1, CHAMP_CUUID: 1, CHAMP_PATH_CUUIDS: 1})
+        .await?
+    {
+        Some(inner) => bson::deserialize_from_document(inner)?,
+        None => return Ok(None)
+    };
+
+    // Build path with parent first
+    let path_cuuids = match doc_parent.path_cuuids {
+        Some(mut inner) => {
+            inner.insert(0, cuuid.to_owned());
+            inner
+        },
+        None => vec![cuuid.to_owned()]
+    };
+
+    Ok(Some(path_cuuids))
 }

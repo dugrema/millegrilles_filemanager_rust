@@ -1,6 +1,14 @@
-use millegrilles_common_rust::certificats::VerificateurPermissions;
+use crate::constants::*;
+use crate::external::mq::*;
+use crate::flow::directories::get_path_cuuid;
+use crate::flow::file_events::{CollectionEventAggregator, DelayedEventEmitterService, emettre_evenement_maj_collection};
+use crate::flow::keys::relay_attached_key;
+use crate::flow::transaction_models::TransactionNouvelleCollection;
 use crate::flow::transactions::FileManagerTransactionService;
+use millegrilles_common_rust::certificats::VerificateurPermissions;
+use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
@@ -10,11 +18,6 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
 use serde::Serialize;
-use crate::constants::*;
-use crate::external::mq::*;
-use crate::flow::file_events::{emettre_evenement_maj_collection, CollectionEventAggregator, DelayedEventEmitterService};
-use crate::flow::keys::relay_attached_key;
-use crate::flow::transaction_models::TransactionNouvelleCollection;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -56,6 +59,13 @@ struct ResponseNewCollection {
     tuuid: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommandNewCollection {
+    pub metadata: DataChiffre,
+    pub cuuid: Option<String>,  // Insertion dans collection destination
+    pub favoris: Option<bool>,
+}
+
 async fn new_collection(
     mongo: &dyn MongoDao,
     messaging: &dyn MessagingService,
@@ -67,7 +77,7 @@ async fn new_collection(
     let attachments = wrapper.message.attachements.take();
 
     // Validate message structure
-    let transaction_value: TransactionNouvelleCollection = wrapper.message.deserialize()?;
+    let command: CommandNewCollection = wrapper.message.deserialize()?;
 
     // Authorization, includes checking for shared folder access (impersonating other user_id for request)
     let user_id = match wrapper.certificate.get_user_id()? {
@@ -88,8 +98,35 @@ async fn new_collection(
     }
 
     let tuuid = wrapper.message.id.clone();
-    let delivery_info = wrapper.delivery_info.clone();
-    transaction.process_transaction(wrapper.into(), None).await?;
+    // let delivery_info = wrapper.delivery_info.clone();
+
+    // Ajouter collection parent au besoin
+    let path_cuuids: Option<Vec<String>> = match command.cuuid.as_ref() {
+        Some(cuuid) => {
+            // Charger le cuuid pour ajouter path vers root
+            match get_path_cuuid(mongo, cuuid).await? {
+                Some(inner) => Some(inner),
+                None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Unknown directory (cuuid not found)")).await
+            }
+        },
+        None => None
+    };
+
+    let transaction_value = TransactionNouvelleCollection {
+        metadata: command.metadata,
+        cuuid: command.cuuid.clone(),
+        favoris: command.favoris,
+        cuuids: path_cuuids,
+        user_id: Some(user_id.clone()),
+    };
+
+    // The unique id of the transaction is the new tuuid
+    let tuuid = transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_NOUVELLE_COLLECTION,
+        serde_json::to_value(transaction_value)?,
+        None
+    ).await?;
 
     // Emettre fichier pour que tous les clients recoivent la mise a jour
     emettre_evenement_maj_collection(
@@ -100,12 +137,12 @@ async fn new_collection(
         user_id.as_str()
     ).await?;
 
-    let evenement_contenu = match transaction_value.cuuid.as_ref() {
+    let evenement_contenu = match command.cuuid.as_ref() {
         Some(cuuid) => CollectionEventAggregator::new(cuuid),
         None => CollectionEventAggregator::new(user_id.as_str())
     }
         .collections_ajoutees(vec![tuuid.clone()]);
     delayed_event_emitter_service.emit(evenement_contenu).await?;
 
-    outbound.respond(delivery_info, ResponseNewCollection { ok: true, tuuid } ).await
+    outbound.respond(wrapper.delivery_info, ResponseNewCollection { ok: true, tuuid } ).await
 }
