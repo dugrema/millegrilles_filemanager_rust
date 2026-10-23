@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use millegrilles_common_rust::bson::doc;
+use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
 use millegrilles_common_rust::dechiffrage::DataChiffre;
@@ -7,7 +9,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::{FormatChif
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
-use millegrilles_common_rust::tracing::info;
+use millegrilles_common_rust::tracing::{debug, error, info};
 use millegrilles_common_rust::v3::ConfigService;
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
@@ -15,8 +17,12 @@ use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
 use millegrilles_common_rust::millegrilles_cryptographie::serde_dates::mapstringepochseconds;
 use serde::{Deserialize, Serialize};
+use crate::constants::ROLE_USAGER;
+use crate::external::mongo::*;
 use crate::external::mongo_struct::{AudioDetail, FileComment, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
 use crate::external::mq::*;
+use crate::flow::directories::get_shared_tuuid;
+use crate::flow::request_models::ResponseFichierRepVersion;
 
 pub async fn process_request<M>(
     config: &dyn ConfigService,
@@ -68,8 +74,8 @@ struct RequestSyncDirectoryResponseFile {
     ok: bool,
     cuuid: Option<String>,
     stats: Option<Vec<ResultatStatistiquesRow>>,
-    files: Vec<ReponseFichierRepVersion>,
-    breadcrumb: Option<Vec<ReponseFichierRepVersion>>,
+    files: Vec<ResponseFichierRepVersion>,
+    breadcrumb: Option<Vec<ResponseFichierRepVersion>>,
     keys: Option<Vec<ResponseRequestDechiffrageV2Cle>>,
     deleted_tuuids: Option<Vec<String>>,
     complete: bool,
@@ -82,6 +88,65 @@ async fn request_sync_directory<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
     info!("Requesting sync directory");
     let request: RequestSyncDirectory = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+    let (user_id, shared_tuuid) = match request.contact_id {
+        None => (user_id, None),
+        Some(contact_id) => {
+            let cuuid = match request.cuuid.as_ref() {
+                Some(inner) => inner.as_str(),
+                None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(403, "Access refused, no tuuid for request with contact_id")).await
+            };
+            let share = get_shared_tuuid(mongo, user_id.as_str(), contact_id.as_str(), cuuid).await?;
+            (share.user_id, share.tuuid)
+        }
+    };
+
+    // Directory filter
+    let deleted = request.deleted.unwrap_or(false);
+    let cuuid = request.cuuid.clone();
+    let filter = match deleted {
+        false => match cuuid.as_ref() {
+            Some(cuuid) => doc!{FIELD_PATH_CUUIDS_0: cuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: false},
+            None => doc!{FIELD_PATH_CUUIDS: {"$exists": false}, FIELD_USER_ID: &user_id, FIELD_DELETED: false}
+        },
+        true => match cuuid.as_ref() {
+            Some(cuuid) => doc!{
+                FIELD_PATH_CUUIDS_0: cuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: true,
+                "$or": [
+                    {FIELD_NODE_TYPE: VALUE_NODE_TYPE_FICHIER, FIELD_FUUIDS_VERSION_0: {"$exists": true}},  // File has not been permanently deleted
+                    {FIELD_NODE_TYPE: {"$ne": VALUE_NODE_TYPE_FICHIER}},                                    // Directory or Collection
+                ]
+            },
+            None => doc!{
+                FIELD_USER_ID: &user_id, FIELD_DELETED: true, FIELD_DELETED_INDIRECT: false,
+                "$or": [
+                    {FIELD_NODE_TYPE: VALUE_NODE_TYPE_FICHIER, FIELD_FUUIDS_VERSION_0: {"$exists": true}},  // File has not been permanently deleted
+                    {FIELD_NODE_TYPE: {"$ne": VALUE_NODE_TYPE_FICHIER}},                                    // Directory or Collection
+                ]
+            }
+        }
+    };
+    debug!("request_sync_directory Filter: {:?}", filter);
+
+    let last_sync = match request.last_sync {
+        Some(last_sync) => {
+            match DateTime::from_timestamp(last_sync, 0) {
+                Some(inner) => Some(inner),
+                None => Err("request_sync_directory Invalid sync_date")?
+            }
+        },
+        None => None
+    };
+    let skip = request.skip.unwrap_or(0);
+    let produce_stats = skip == 0 || deleted || request.produce_stats == Some(true);
 
     todo!();
 
@@ -127,152 +192,9 @@ struct RequeteDocumentsParTuuids {
     contact_id: Option<String>,  // Identificateur de contact direct
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct FileCommentResponse {
-    pub comment_id: String,
-    pub encrypted_data: EncryptedDocument,
-    #[serde(default, with="ts_seconds")]
-    pub date: DateTime<Utc>,
-    pub user_id: Option<String>,
-}
-
-impl From<FileComment> for FileCommentResponse {
-    fn from(value: FileComment) -> Self {
-        Self {
-            comment_id: value.comment_id,
-            encrypted_data: value.encrypted_data,
-            date: value.date,
-            user_id: value.user_id,
-        }
-    }
-}
-
-#[derive(Clone, Serialize)]
-pub struct ResponseVersionCourante {
-    pub fuuid: String,
-    pub mimetype: String,
-    pub taille: u64,
-    pub fuuids_reclames: Vec<String>,
-
-    #[serde(with="mapstringepochseconds")]
-    pub visites: HashMap<String, DateTime<Utc>>,
-
-    // Mapping date
-    #[serde(default, rename="_mg-derniere-modification", with="ts_seconds_option")]
-    pub derniere_modification: Option<DateTime<Utc>>,
-
-    // Champs optionnels media
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub height: Option<u32>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub width: Option<u32>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub duration: Option<f32>,
-    #[serde(rename="videoCodec", skip_serializing_if="Option::is_none")]
-    pub video_codec: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub anime: Option<bool>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub images: Option<HashMap<String, ImageDetail>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub video: Option<HashMap<String, VideoDetail>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub audio: Option<Vec<AudioDetail>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub subtitles: Option<Vec<SubtitleDetail>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub web_subtitles: Option<Vec<MediaWebSubtitleDetail>>,
-
-    // Information de chiffrage symmetrique (depuis 2024.3.0)
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub cle_id: Option<String>,
-    #[serde(default, with="optionformatchiffragestr", skip_serializing_if="Option::is_none")]
-    pub format: Option<FormatChiffrage>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub nonce: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub verification: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct ReponseFichierRepVersion {
-    pub tuuid: String,
-    pub user_id: String,
-    pub type_node: String,
-    pub supprime: bool,
-    pub supprime_indirect: bool,
-    pub metadata: DataChiffre,
-
-    // Champs pour type_node Fichier
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub mimetype: Option<String>,
-    /// Fuuids des versions en ordre (plus recent en dernier)
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub fuuids_versions: Option<Vec<String>>,
-
-    // Champs pour type_node Fichiers/Repertoires
-    /// Path des cuuids parents (inverse, parent immediat est index 0)
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub path_cuuids: Option<Vec<String>>,
-
-    // pub language: Option<String>,
-    pub comments: Option<Vec<FileCommentResponse>>,
-    pub tags: Option<Vec<EncryptedDocument>>,
-
-    // Champs recuperes a partir de la version courante
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub version_courante: Option<ResponseVersionCourante>,
-
-    #[serde(default, skip_serializing_if="Option::is_none", with="ts_seconds_option")]
-    pub derniere_modification: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if="Option::is_none", with="ts_seconds_option")]
-    pub date_creation: Option<DateTime<Utc>>,
-
-    // Information de chiffrage symmetrique (depuis 2024.3.0)
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub cle_id: Option<String>,
-    #[serde(default, with="optionformatchiffragestr", skip_serializing_if="Option::is_none")]
-    pub format: Option<FormatChiffrage>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub nonce: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub verification: Option<String>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub audio_stream_info: Option<Vec<AudioDetail>>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub subtitle_stream_info: Option<Vec<SubtitleDetail>>,
-}
-
-impl From<NodeFichierRepOwned> for ReponseFichierRepVersion {
-    fn from(value: NodeFichierRepOwned) -> Self {
-        Self {
-            tuuid: value.tuuid,
-            user_id: value.user_id,
-            type_node: value.type_node,
-            supprime: value.supprime,
-            supprime_indirect: value.supprime_indirect,
-            metadata: value.metadata,
-            mimetype: value.mimetype,
-            fuuids_versions: value.fuuids_versions,
-            path_cuuids: value.path_cuuids,
-            comments: None,
-            tags: None,
-            version_courante: None,
-            derniere_modification: value.derniere_modification,
-            date_creation: value.date_creation,
-            cle_id: None,
-            format: None,
-            nonce: None,
-            verification: None,
-            audio_stream_info: None,
-            subtitle_stream_info: None,
-        }
-    }
-}
-
 #[derive(Clone, Serialize)]
 struct ReponseDocumentsParTuuid {
-    fichiers: Vec<ReponseFichierRepVersion>
+    fichiers: Vec<ResponseFichierRepVersion>
 }
 
 async fn request_documents_by_tuuid<M>(

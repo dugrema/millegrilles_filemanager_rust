@@ -5,27 +5,52 @@ use millegrilles_common_rust::mongo_dao::{ChampIndex, IndexOptions, MongoDao};
 pub const COLLECTION_NAME_REDOLOG: &str = "FileManager/redolog";
 pub const COLLECTION_NAME_TRACKING: &str = "FileManager/tracking";
 
+pub const NOM_COLLECTION_FICHIERS_REP: &str = "FileManager/fichiersRep";
+pub const NOM_COLLECTION_VERSIONS: &str = "FileManager/versionsFichiers";
+pub const NOM_COLLECTION_MEDIA: &str = "FileManager/media";
+pub const NOM_COLLECTION_DOCUMENTS: &str = "FileManager/documents";
+pub const NOM_COLLECTION_VIDEO_JOBS: &str = "FileManager/jobs/video";
+pub const NOM_COLLECTION_PARTAGE_CONTACT: &str = "FileManager/partage/contacts";
+pub const NOM_COLLECTION_PARTAGE_COLLECTIONS: &str = "FileManager/partage/collections";
+pub const NOM_COLLECTION_QUOTAS_USAGERS: &str = "FileManager/quotas/usagers";
+pub const NOM_COLLECTION_TEMP_VISITS: &str = "FileManager/temp/visits";
+pub const NOM_COLLECTION_JOBS_LEASES: &str = "FileManager/jobs/leases";
+pub const NOM_COLLECTION_JOBS_VERSIONS_LEASES: &str = "FileManager/jobs/versionsLeases";
+pub const NOM_COLLECTION_FILE_COMMENTS: &str = "FileManager/fileComments";
+
+
 pub const INDEX_REDO_LOG_ID: &str = "redo_log_id";
 
 // New fields
-pub const FIELD_USER_ID: &str = "userId";
+pub const FIELD_USER_ID: &str = "user_id";
+pub const FIELD_DELETED: &str = "deleted";
+pub const FIELD_DELETED_INDIRECT: &str = "deleted_indirect";
 pub const FIELD_DATE_CREATED: &str = "created";
 pub const FIELD_DATE_MODIFIED: &str = "modified";
+pub const FIELD_FUUID: &str = "fuuid";
+pub const FIELD_TUUID: &str = "tuuid";
+pub const FIELD_CUUID: &str = "cuuid";
+pub const FIELD_CUUIDS: &str = "cuuids";
+pub const FIELD_PATH_CUUIDS: &str = "path_cuuids";
+pub const FIELD_PATH_CUUIDS_0: &str = "path_cuuids.0";
+pub const FIELD_NODE_TYPE: &str = "node_type";
+pub const FIELD_FUUIDS_VERSIONS: &str = "fuuids_versions";
+pub const FIELD_FUUIDS_VERSION_0: &str = "fuuids_versions.0";
 
 // Old fields
 
-pub const CHAMP_FUUID: &str = "fuuid";  // UUID fichier
+pub const CHAMP_FUUID: &str = FIELD_FUUID;  // UUID fichier
 pub const CHAMP_FUUIDS: &str = "fuuids";
 pub const CHAMP_FUUIDS_RECLAMES: &str = "fuuids_reclames";
-pub const CHAMP_FUUIDS_VERSIONS: &str = "fuuids_versions";
-pub const CHAMP_TUUID: &str = "tuuid";  // UUID transaction initiale (fichier ou collection)
+pub const CHAMP_FUUIDS_VERSIONS: &str = FIELD_FUUIDS_VERSIONS;
+pub const CHAMP_TUUID: &str = FIELD_TUUID;  // UUID transaction initiale (fichier ou collection)
 pub const CHAMP_TUUIDS: &str = "tuuids";
-pub const CHAMP_CUUID: &str = "cuuid";  // UUID collection de tuuids
-pub const CHAMP_CUUIDS: &str = "cuuids";  // Liste de cuuids (e.g. appartenance a plusieurs collections)
+pub const CHAMP_CUUID: &str = FIELD_CUUID;  // UUID collection de tuuids
+pub const CHAMP_CUUIDS: &str = FIELD_CUUIDS;  // Liste de cuuids (e.g. appartenance a plusieurs collections)
 pub const CHAMP_CUUIDS_SUPPRIMES: &str = "cuuids_supprimes";  /// Liste de cuuids (e.g. appartenance a plusieurs collections)
 pub const CHAMP_CUUIDS_SUPPRIMES_INDIRECT: &str = "cuuids_supprimes_indirect";  /// Liste de cuuids supprimes via parent
-pub const CHAMP_SUPPRIME: &str = "supprime";
-pub const CHAMP_SUPPRIME_INDIRECT: &str = "supprime_indirect";
+pub const CHAMP_SUPPRIME: &str = FIELD_DELETED;
+pub const CHAMP_SUPPRIME_INDIRECT: &str = FIELD_DELETED_INDIRECT;
 pub const CHAMP_SUPPRIME_PATH: &str = "supprime_cuuids_path";
 pub const CHAMP_ARCHIVE: &str = "archive";
 pub const CHAMP_NOM: &str = "nom";
@@ -34,7 +59,7 @@ pub const CHAMP_TITRE: &str = "titre";
 pub const CHAMP_MIMETYPE: &str = "mimetype";
 pub const CHAMP_FUUID_V_COURANTE: &str = "fuuid_v_courante";
 pub const CHAMP_FAVORIS: &str = "favoris";
-pub const CHAMP_TYPE_NODE: &str = "type_node";
+pub const CHAMP_TYPE_NODE: &str = FIELD_NODE_TYPE;
 // pub const CHAMP_FUUID_MIMETYPES: &str = "fuuidMimetypes";
 pub const CHAMP_FLAG_INDEX: &str = "flag_index";
 pub const CHAMP_FLAG_RAG: &str = "flag_rag";
@@ -86,6 +111,8 @@ pub const VIDEO_CONVERSION_ETAT_ERROR_TOOMANYRETRIES: i32 = 5;
 
 pub const VIDEO_CONVERSION_TIMEOUT_RUNNING: i32 = 10 * 60;  // Secondes
 pub const VIDEO_CONVERSION_TIMEOUT_PERSISTING: i32 = 60 * 60;  // Secondes
+
+pub const VALUE_NODE_TYPE_FICHIER: &str = "Fichier";
 
 
 pub async fn create_index_mongodb(db: &dyn MongoDao) -> Result<(), CommonError> {

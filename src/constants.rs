@@ -5,3 +5,6 @@ pub const DOMAINE_FILECONTROLER_NOM: &str = "filecontroler";
 pub const DOMAINE_MEDIA_NOM: &str = "media";
 
 pub const DELEGATION_OWNER: &str = "proprietaire";
+
+pub const ROLE_USAGER: &str = "usager";
+pub const ROLE_NAVIGATEUR: &str = "navigateur";

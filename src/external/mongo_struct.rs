@@ -12,8 +12,11 @@ pub struct NodeFichierRepOwned {
     /// Identificateur unique d'un node pour l'usager
     pub tuuid: String,
     pub user_id: String,
+    #[serde(rename="node_type")]
     pub type_node: String,
+    #[serde(rename="deleted")]
     pub supprime: bool,
+    #[serde(rename="deleted_indirect")]
     pub supprime_indirect: bool,
     pub metadata: DataChiffre,
 
@@ -236,4 +239,18 @@ pub struct FileComment {
     pub date: DateTime<Utc>,
     /// User_id from the transaction certificate. None implies this is a system comment.
     pub user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContactRow {
+    pub contact_id: String,
+    pub user_id: String,
+    pub contact_user_id: String
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RowPartagesUsager {
+    pub tuuid: String,
+    pub user_id: String,
+    pub contact_id: String,
 }
