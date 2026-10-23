@@ -7,7 +7,13 @@ pub const COLLECTION_NAME_TRACKING: &str = "FileManager/tracking";
 
 pub const INDEX_REDO_LOG_ID: &str = "redo_log_id";
 
+// New fields
 pub const FIELD_USER_ID: &str = "userId";
+pub const FIELD_DATE_CREATED: &str = "created";
+pub const FIELD_DATE_MODIFIED: &str = "modified";
+
+// Old fields
+
 pub const CHAMP_FUUID: &str = "fuuid";  // UUID fichier
 pub const CHAMP_FUUIDS: &str = "fuuids";
 pub const CHAMP_FUUIDS_RECLAMES: &str = "fuuids_reclames";
