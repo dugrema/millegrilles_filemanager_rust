@@ -22,6 +22,7 @@ use crate::external::mongo::*;
 use crate::external::mongo_struct::{AudioDetail, FileComment, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
 use crate::external::mq::*;
 use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_shared_tuuid, ResultatStatistiquesRow};
+use crate::flow::keys::convert_decrypted_key_into_v2;
 use crate::flow::request_models::ResponseFichierRepVersion;
 
 pub async fn process_request<M>(
@@ -211,8 +212,7 @@ async fn request_sync_directory<M>(
         let key_response = outbound.get_keys(DOMAIN_NAME, keys, None).await?;
         let mut decryption_key_type = Vec::new();
         for k in key_response {
-            todo!()
-            // decryption_key_type.push(k.into());
+            decryption_key_type.push(convert_decrypted_key_into_v2(k)?);
         }
         sync_response.keys = Some(decryption_key_type);
     }
