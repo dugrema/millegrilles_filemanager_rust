@@ -136,7 +136,6 @@ async fn new_collection(
         tuuid.as_str(),
         user_id.as_str()
     ).await?;
-
     let evenement_contenu = match command.cuuid.as_ref() {
         Some(cuuid) => CollectionEventAggregator::new(cuuid),
         None => CollectionEventAggregator::new(user_id.as_str())

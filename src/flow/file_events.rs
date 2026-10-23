@@ -7,10 +7,10 @@ use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongo_dao::MongoDao;
-use millegrilles_common_rust::{bson, tokio};
+use millegrilles_common_rust::{bson, serde_json, tokio};
 use millegrilles_common_rust::tokio::select;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
-use millegrilles_common_rust::tracing::{debug, error};
+use millegrilles_common_rust::tracing::{debug, error, info};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use serde::{Deserialize, Serialize};
 use crate::constants::*;
@@ -163,6 +163,7 @@ impl DelayedEventEmitterService {
             let mut guard = self.cuuids_buffer.lock().expect("Mutex poisoned");
             match guard.get_mut(&cuuid) {
                 Some(delayed) => {
+                    debug!("Throttling message for {}", cuuid);
                     match delayed.message.as_mut() {
                         Some(buffer) => buffer.merge(message)?,
                         None => {
@@ -195,6 +196,7 @@ impl DelayedEventEmitterService {
 
     async fn thread(&self) {
         let duration: tokio::time::Duration = self.delay.to_std().unwrap().into();
+        info!("DelayedEventEmitterService thread started with delay of {:?}", duration);
         loop {
             if let Err(e) = self.process_throttled_messages().await {
                 error!("Error emitting user messages: {:?}", e);
@@ -236,6 +238,7 @@ impl DelayedEventEmitterService {
         };
 
         if let Some(delayed_message) = delayed_message {
+            debug!("Releasing throttled message for {}", cuuid);
             if let Some(message) = delayed_message.message {
                 self.emit_message(message).await?;
             }
@@ -252,6 +255,7 @@ impl DelayedEventEmitterService {
         )
             .partition(&message.cuuid)
             .build();
+        debug!("Emit event message on cuuid {}", message.cuuid);
         self.outbound.emit_event(routing, message).await
     }
 }
@@ -274,6 +278,7 @@ pub async fn emettre_evenement_maj_collection(
         Err(e) => Err(format!("grosfichiers.where Erreur collection.find_one pour {} : {:?}", tuuid, e))?
     };
 
+    debug!("Emitting event majCollection on {} with\n{}", tuuid, serde_json::to_string(&file_response)?);
     let routage = RoutageMessageAction::builder(
         DOMAIN_NAME,
         EVENEMENT_MAJ_COLLECTION,

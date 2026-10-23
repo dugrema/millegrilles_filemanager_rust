@@ -35,14 +35,14 @@ pub struct NodeFichierRepOwned {
     // Mapping date - requis pour sync
     #[serde(
         default,
-        rename(deserialize="modified"),
+        rename = "modified",
         skip_serializing_if = "Option::is_none",
         with="option_chrono_04_datetime"
     )]
     pub derniere_modification: Option<DateTime<Utc>>,
     #[serde(
         default,
-        rename(deserialize="created"),
+        rename = "created",
         skip_serializing_if = "Option::is_none",
         with="option_chrono_04_datetime"
     )]

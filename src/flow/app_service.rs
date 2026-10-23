@@ -105,7 +105,6 @@ impl ApplicationService {
         let incoming_clone = incoming.clone();
         join_set.spawn(async move {self_clone.process_backup_thread(incoming_clone).await});
 
-        let self_clone = self.clone();
         let event_emitter_service = self.event_emitter_service.clone();
         join_set.spawn(async move {event_emitter_service.run(shutdown_token).await});
 
