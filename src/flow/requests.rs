@@ -44,6 +44,7 @@ pub async fn process_request<M>(
                 REQUEST_SYNC_DIRECTORY => request_sync_directory(mongo, outbound, wrapper).await,
                 REQUETE_INFO_STATISTIQUES => request_statistics_info(mongo, outbound, wrapper).await,
                 REQUETE_DOCUMENTS_PAR_TUUID => request_documents_by_tuuid(mongo, outbound, wrapper).await,
+                REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
 
                 _ => {
                     info!("Unknown action {} for process_request, skipping", action);
@@ -262,7 +263,7 @@ async fn request_documents_by_tuuid<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    info!("Requesting sync directory");
+    info!("Requesting documents by tuuid");
 
     todo!();
 
@@ -297,4 +298,74 @@ fn extract_key_ids_from_file(r: &ResponseFichierRepVersion) -> Result<Vec<&Strin
     }
 
     Ok(key_ids.into_iter().collect())
+}
+
+#[derive(Deserialize)]
+struct RequestFilesByTuuid {
+    /// Tuuids to load
+    tuuids: Vec<String>,
+    /// Use this shared contact_id (more efficient than shared==true)
+    shared_contact_id: Option<String>,
+    /// Use true to allow loading from any shared collection
+    shared: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ResponseFilesByTuuids {
+    files: Vec<ResponseFichierRepVersion>,
+    keys: Option<Vec<ResponseRequestDechiffrageV2Cle>>,
+}
+
+async fn request_files_by_tuuid<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    info!("Requesting files by tuuid");
+    let request: RequestFilesByTuuid = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    let mut user_ids = HashSet::new();
+    user_ids.insert(user_id.clone());
+    let shared = request.shared_contact_id.is_some() || request.shared == Some(true);
+
+    if shared {
+        todo!();
+    }
+
+    let user_ids: Vec<String> = user_ids.into_iter().collect();
+    let filter = doc! {
+        FIELD_TUUID: { "$in": &request.tuuids },
+        FIELD_USER_ID: { "$in": user_ids },
+    };
+
+    let (result, _) = get_complete_files(mongo, filter, None, None, None).await?;
+    let files = result.fichiers;
+
+    let mut response = ResponseFilesByTuuids { files, keys: None };
+    let mut keys: HashSet<&String> = HashSet::new();
+    for r in &response.files {
+        let file_keys = extract_key_ids_from_file(r)?;
+        keys.extend(file_keys);
+    }
+    // Convert &String to String for request.
+    if ! keys.is_empty() {
+        let keys = keys.into_iter().map(|k| k.to_string()).collect();
+        let key_response = outbound.get_keys(DOMAIN_NAME, keys, None).await?;
+        let mut decryption_key_type = Vec::new();
+        for k in key_response {
+            decryption_key_type.push(convert_decrypted_key_into_v2(k)?);
+        }
+        response.keys = Some(decryption_key_type);
+    }
+
+    outbound.respond(wrapper.delivery_info, response).await
 }
