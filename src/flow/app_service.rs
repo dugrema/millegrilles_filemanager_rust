@@ -21,19 +21,23 @@ use millegrilles_common_rust::v3::facades::message_inbound::MessageInboundValida
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::impls::backup_restorer::RestorationState;
 use millegrilles_common_rust::v3::impls::messaging_service::MessagingServiceImpl;
-use millegrilles_common_rust::v3::{BackupService, ChiffrageService, ConfigService, PkiService};
+use millegrilles_common_rust::v3::{BackupService, ChiffrageService, ConfigService, MessagingService, PkiService};
 use std::sync::Arc;
+use millegrilles_common_rust::tokio_util::sync::CancellationToken;
+use crate::flow::file_events::DelayedEventEmitterService;
 
 /// Handles queue consumer threads, calls individual routing methods
 pub struct ApplicationService {
     pki: Arc<dyn PkiService>,
     config: Arc<dyn ConfigService>,
     chiffrage: Arc<dyn ChiffrageService>,
+    messaging: Arc<dyn MessagingService>,
     outbound: Arc<MessageOutboundFacade>,
     transaction: Arc<FileManagerTransactionService>,
     mongo: Arc<MongoDaoImpl>,
     backup: Arc<dyn BackupService>,
     document_encryption: Arc<DocumentEncryptionServiceImpl>,
+    event_emitter_service: Arc<DelayedEventEmitterService>,
 }
 
 impl ApplicationService {
@@ -41,21 +45,25 @@ impl ApplicationService {
         pki: Arc<dyn PkiService>,
         config: Arc<dyn ConfigService>,
         chiffrage: Arc<dyn ChiffrageService>,
+        messaging: Arc<dyn MessagingService>,
         outbound: Arc<MessageOutboundFacade>,
         transaction: Arc<FileManagerTransactionService>,
         mongo: Arc<MongoDaoImpl>,
         backup: Arc<dyn BackupService>,
         document_encryption: Arc<DocumentEncryptionServiceImpl>,
+        event_emitter_service: Arc<DelayedEventEmitterService>,
     ) -> Self {
         Self {
             pki,
             config,
             chiffrage,
+            messaging,
             outbound,
             transaction,
             mongo,
             backup,
             document_encryption,
+            event_emitter_service,
         }
     }
 
@@ -66,7 +74,12 @@ impl ApplicationService {
     }
 
     /// Call to spawn the consumer threads
-    pub fn start(self: Arc<Self>, join_set: &mut JoinSet<()>, incoming: Arc<MessageInboundValidator>) -> Result<(), CommonError> {
+    pub fn start(
+        self: Arc<Self>,
+        join_set: &mut JoinSet<()>,
+        incoming: Arc<MessageInboundValidator>,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), CommonError> {
 
         let self_clone = self.clone();
         let incoming_clone = incoming.clone();
@@ -91,6 +104,10 @@ impl ApplicationService {
         let self_clone = self.clone();
         let incoming_clone = incoming.clone();
         join_set.spawn(async move {self_clone.process_backup_thread(incoming_clone).await});
+
+        let self_clone = self.clone();
+        let event_emitter_service = self.event_emitter_service.clone();
+        join_set.spawn(async move {event_emitter_service.run(shutdown_token).await});
 
         Ok(())
     }
@@ -208,9 +225,10 @@ impl ApplicationService {
             match result {
                 Ok(message) => {
                     if let Err(e) = process_transaction(
-                        self.config.as_ref(),
                         self.mongo.as_ref(),
+                        self.messaging.as_ref(),
                         self.outbound.as_ref(),
+                        self.event_emitter_service.as_ref(),
                         self.document_encryption.as_ref(),
                         self.transaction.as_ref(),
                         message

@@ -21,9 +21,11 @@ use millegrilles_common_rust::v3::impls::messaging_service::MessagingServiceImpl
 use millegrilles_common_rust::v3::impls::security_service::SecurityServiceImpl;
 use millegrilles_common_rust::v3::{ChiffrageService, ConfigService};
 use std::sync::Arc;
+use millegrilles_common_rust::chrono::Duration;
 use millegrilles_common_rust::v3::facades::document_encryption_service::DocumentEncryptionServiceImpl;
 use crate::constants::DOMAIN_NAME;
 use crate::external::mongo::*;
+use crate::flow::file_events::DelayedEventEmitterService;
 
 pub struct AppContext {
     pub join_set: JoinSet<()>,
@@ -81,15 +83,23 @@ impl AppContext {
             data_tables
         ));
 
+        let event_emitter_service = Arc::new(DelayedEventEmitterService::new(
+            outbound.clone(),
+            Duration::milliseconds(800),
+            30
+        ));
+
         let app_service = Arc::new(ApplicationService::new(
             security.clone(),
             config.clone(),
             security.clone(),
+            messaging.clone(),
             outbound.clone(),
             transaction.clone(),
             mongo.clone(),
             backup.clone(),
             document_encryption.clone(),
+            event_emitter_service.clone(),
         ));
 
         info!("Configure middleware resources : queues, index, tables, ...");
@@ -165,7 +175,7 @@ async fn start_threads(
 
     if ! is_restoring {
         // Spawn consumer threads
-        app_service.start(join_set, inbound.clone())?;
+        app_service.start(join_set, inbound.clone(), shutdown_token.clone())?;
     } else {
         let master_key = match master_key {
             Some(key) => key,
