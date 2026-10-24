@@ -1,5 +1,7 @@
+use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::constantes::ROLE_MEDIA;
+use millegrilles_common_rust::chrono::{Duration, Utc};
+use millegrilles_common_rust::constantes::*;
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
@@ -10,9 +12,10 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, PkiService};
 use serde::Deserialize;
-use crate::external::mongo::CHAMP_FLAG_MEDIA_TRAITE;
+use crate::external::mongo::*;
 use crate::external::mq::*;
-use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation};
+use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep};
+use crate::models::TypeNode;
 
 pub async fn process_command<M, E>(
     config: &dyn ConfigService,
@@ -34,7 +37,7 @@ pub async fn process_command<M, E>(
         MessageKind::Commande => {
             match action {
                 COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo, outbound, wrapper).await,
-                COMMAND_LEASE_FOR_INDEX => command_lease_files_for_index(mongo, outbound, wrapper).await,
+                COMMAND_LEASE_FOR_INDEX => command_lease_files_for_indexing(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_SUMMARY => command_lease_files_for_summary(mongo, outbound, wrapper).await,
 
                 _ => {
@@ -73,12 +76,34 @@ async fn command_lease_files_for_image<M>(
     }
 }
 
-async fn command_lease_files_for_index<M>(
+async fn command_lease_files_for_indexing<M>(
     mongo: &M,
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    todo!()
+
+    let request: RequestLeaseForBatchOperation = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_SOLR_RELAI.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    // CHAMP_FLAG_INDEX
+    match get_batch_of_fichiersrep_leases(
+        mongo,
+        outbound,
+        request,
+        CHAMP_FLAG_INDEX,
+        true
+    ).await {
+        Ok(response) => {
+            outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
+        },
+        Err(e) => {
+            info!("command_lease_files_for_indexing Error: {:?}", e);
+            outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "No files available")).await
+        }
+    }
 }
 
 async fn command_lease_files_for_summary<M>(
@@ -86,5 +111,35 @@ async fn command_lease_files_for_summary<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    todo!()
+
+    let request: RequestLeaseForBatchOperation = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_SOLR_RELAI.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    let expiry = Utc::now() - Duration::minutes(5);
+    let batch_size = request.batch_size.unwrap_or(5);
+    // Iterate through files that have a flag_rag == false or undefined.
+    let borrower = CHAMP_FLAG_SUMMARY;
+    let filtre = doc!{
+        FIELD_DELETED: false,
+        CHAMP_TYPE_NODE: TypeNode::Fichier.to_str(),
+        "$or": [
+            {borrower: {"$exists": false}},
+            {borrower: false},
+        ]
+    };
+    match lease_batch_fichiersrep(mongo, outbound, &expiry, borrower, filtre, batch_size, true, true).await {
+        Ok(Some(response)) => {
+            outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
+        },
+        Ok(None) => {
+            outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "No files available")).await
+        }
+        Err(e) => {
+            info!("command_lease_files_for_summary Error: {:?}", e);
+            outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await
+        }
+    }
 }

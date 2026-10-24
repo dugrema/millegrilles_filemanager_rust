@@ -11,14 +11,15 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::mongodb::options::ReturnDocument;
-use millegrilles_common_rust::tracing::{debug, error, info};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
 use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
 use crate::constants::*;
 use crate::external::mongo::*;
-use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierVersionOwned};
+use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::flow::keys::convert_decrypted_key_into_v2;
+use crate::flow::request_models::FileCommentResponse;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackgroundJobParams {
@@ -295,7 +296,7 @@ where T: Into<JobTrigger<'a>> {
 
 #[derive(Deserialize)]
 pub struct RequestLeaseForBatchOperation {
-    batch_size: Option<usize>,
+    pub batch_size: Option<usize>,
     filehost_id: Option<String>,
 }
 
@@ -402,21 +403,29 @@ pub async fn lease_batch_fichiersversion<M>(
         let mut cle_ids = HashSet::with_capacity(leases.len());
         for lease in &leases {
             if let Some(cle_id) = lease.version.cle_id.as_ref() {
-                cle_ids.insert(cle_id);
+                cle_ids.insert(cle_id.as_str());
             } else {
-                cle_ids.insert(&lease.version.fuuid);  // Legacy
+                cle_ids.insert(&lease.version.fuuid.as_str());  // Legacy
             }
         }
-        let key_ids: Vec<String> = cle_ids.into_iter().map(|k| k.to_string()).collect();
-        let keys = outbound.get_keys(DOMAIN_NAME, key_ids, None).await?;
-        let mut secret_keys = Vec::with_capacity(keys.len());
-        for k in keys {
-            secret_keys.push(convert_decrypted_key_into_v2(k)?);
-        }
+        let secret_keys = get_decrypted_keys_by_id(outbound, &cle_ids.into_iter().collect()).await?;
         Ok(Some(VersionLeasesResponse { ok: true, leases, secret_keys }))
     } else {
         Ok(None)
     }
+}
+
+pub async fn get_decrypted_keys_by_id(
+    outbound: &MessageOutboundFacade,
+    keys: &Vec<&str>
+) -> Result<Vec<ResponseRequestDechiffrageV2Cle>, CommonError> {
+    let key_ids: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+    let keys = outbound.get_keys(DOMAIN_NAME, key_ids, None).await?;
+    let mut secret_keys = Vec::with_capacity(keys.len());
+    for k in keys {
+        secret_keys.push(convert_decrypted_key_into_v2(k)?);
+    }
+    Ok(secret_keys)
 }
 
 async fn lease_file_version(
@@ -440,5 +449,220 @@ async fn lease_file_version(
         .upsert(true)
         .await?;
 
+    Ok(result.modified_count == 1 || result.upserted_id.is_some())
+}
+
+#[derive(Serialize)]
+pub struct LeaseResponse {
+    tuuid: String,
+    user_id: String,
+    metadata: DataChiffre,
+    mimetype: Option<String>,
+    cuuids: Option<Vec<String>>,
+    version: Option<NodeFichierVersionOwned>,  // Option for folders, no file content
+    media: Option<MediaOwnedRow>,
+    comments: Option<Vec<FileCommentResponse>>,
+}
+
+#[derive(Serialize)]
+pub struct LeasesResponse {
+    ok: bool,
+    leases: Vec<LeaseResponse>,
+    secret_keys: Vec<ResponseRequestDechiffrageV2Cle>,
+}
+
+/// Lease a batch of files for indexing (AI indexing)
+pub async fn get_batch_of_fichiersrep_leases<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    request: RequestLeaseForBatchOperation,
+    borrower: &str,
+    include_comments: bool
+) -> Result<LeasesResponse, CommonError> where M: MongoDaoTyped
+{
+    let expiry = Utc::now() - Duration::minutes(5);
+    let batch_size = request.batch_size.unwrap_or(5);
+    // Iterate through files that have a flag_rag == false or undefined.
+    let filtre = doc!{
+        FIELD_DELETED: false,
+        "$or": [
+            {borrower: {"$exists": false}},
+            {borrower: false},
+        ]
+    };
+    match lease_batch_fichiersrep(mongo, outbound, &expiry, borrower, filtre, batch_size, false, include_comments).await? {
+        Some(inner) => Ok(inner),
+        None => Err(CommonError::Str("No files available"))
+    }
+}
+
+
+/// Lease a batch of files based on a FichiersRep filtre.
+pub async fn lease_batch_fichiersrep<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    expiry: &DateTime<Utc>,
+    borrower: &str,
+    filtre: Document,
+    batch_size: usize,
+    include_media: bool,
+    include_comments: bool
+) -> Result<Option<LeasesResponse>, CommonError> where M: MongoDaoTyped {
+    let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    info!("lease_batch_fichiersrep Getting batch for {}, batch size: {}", borrower, batch_size);
+
+    // Built aggregation pipeline on fichiers_rep joining on versions for files
+    let mut pipeline = vec![doc! {"$match": filtre}]; // Match on fichiers_rep
+
+    // Move all content under fichierrep doc for easier mapping to CompleteFileRow
+    pipeline.push(doc!{"$replaceRoot": {"newRoot": {"fichierrep": "$$ROOT"}}});
+
+    // Join version information
+    pipeline.push(doc!{"$lookup": {
+            "from": NOM_COLLECTION_VERSIONS,
+            "localField": "fichierrep.fuuids_versions.0",
+            "foreignField": "fuuid",
+            "as": "versions",
+        }}
+    );
+    pipeline.push(doc!{"$addFields": {
+        "tuuid": "$fichierrep.tuuid",   // Used for troubleshooting deserialization errors
+        "current_version": {"$arrayElemAt": ["$versions", 0]},
+    }});
+    pipeline.push(doc!{"$unset": "versions"});
+
+    if include_media {
+        // Filter out files that have not been processed yet. Note: this will filter out collections/directories.
+        pipeline.push(doc!{"$match": {format!("current_version.{}", CHAMP_FLAG_MEDIA_TRAITE): true}});
+
+        // Join media information
+        pipeline.push(doc! {"$lookup": {
+                "from": NOM_COLLECTION_MEDIA,
+                "localField": "current_version.fuuid",
+                "foreignField": "fuuid",
+                "as": "medias",
+            }}
+        );
+        pipeline.push(doc! {"$addFields": {
+            "media": {"$arrayElemAt": ["$medias", 0]},
+        }});
+        pipeline.push(doc! {"$unset": "medias"})
+    }
+
+    if include_comments {
+        // Join media information
+        pipeline.push(doc! {"$lookup": {
+                "from": NOM_COLLECTION_FILE_COMMENTS,
+                "localField": "fichierrep.tuuid",
+                "foreignField": "tuuid",
+                "as": "comments",
+            }}
+        );
+    }
+
+    let mut leases = Vec::with_capacity(batch_size);
+
+    debug!("lease_batch_fichiersrep Pipeline: {:?}", pipeline);
+
+    let mut cursor = collection.aggregate(pipeline).await?;
+    while cursor.advance().await? {
+        let row = cursor.deserialize_current()?;
+        let tuuid = row.get_str("tuuid").unwrap_or("UNKNOWN").to_string();
+        let row: CompleteFileRow = match bson::deserialize_from_document(row) {
+            Ok(inner) => inner,
+            Err(e) => {
+                warn!("get_complete_files Deserialization error on tuuid {}: {:?}", tuuid, e);
+                continue    // Skip this entry
+            }
+        };
+
+        let file = row.fichierrep;
+        let version = row.current_version;
+
+        // Attempt a lease on the file
+        if lease_file(mongo, file.user_id.as_str(), file.tuuid.as_str(), borrower, expiry).await? {
+            // Add the file to leases
+            let cuuids = match file.path_cuuids {
+                None => None,
+                Some(cuuids) => {
+                    Some(cuuids.into_iter().map(|c| c.to_string()).collect())
+                }
+            };
+            let comments = match row.comments {
+                None => None,
+                Some(comments) => {
+                    Some(comments.into_iter().map(|c| c.into()).collect())
+                }
+            };
+
+            leases.push(LeaseResponse {
+                tuuid: file.tuuid.to_string(),
+                user_id: file.user_id.to_string(),
+                metadata: file.metadata.into(),
+                cuuids,
+                mimetype: match file.mimetype { Some(inner) => Some(inner.to_string()), None => None},
+                version,
+                media: row.media,
+                comments,
+            });
+        }
+
+        if leases.len() >= batch_size {
+            break
+        }
+    }
+
+    info!("lease_batch_fichiersrep Batch for {} ready: {} leases", borrower, leases.len());
+
+    if leases.len() > 0 {
+        info!("lease_batch_fichiersrep Fetching decryption keys for {} leases for borrower {}", leases.len(), borrower);
+        // Get all decrypted keys for the files
+        let mut cle_ids = HashSet::with_capacity(leases.len());
+        for lease in &leases {
+            if let Some(cle_id) = lease.metadata.cle_id.as_ref() {
+                cle_ids.insert(cle_id.as_str());
+            } else if let Some(ref_hachage_bytes) = lease.metadata.ref_hachage_bytes.as_ref() {
+                cle_ids.insert(ref_hachage_bytes.as_str());  // Legacy
+            }
+            if let Some(version) = lease.version.as_ref() {
+                if let Some(cle_id) = version.cle_id.as_ref() {
+                    cle_ids.insert(cle_id.as_str());
+                } else {
+                    cle_ids.insert(version.fuuid.as_str());  // Legacy
+                }
+            }
+        }
+        let secret_keys = get_decrypted_keys_by_id(outbound, &cle_ids.into_iter().collect()).await?;
+        Ok(Some(LeasesResponse { ok: true, leases, secret_keys }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Leases a file. Returns true when successful.
+async fn lease_file(
+    mongo: &dyn MongoDao,
+    user_id: &str,
+    tuuid: &str,
+    borrower: &str,
+    expiry: &DateTime<Utc>
+) -> Result<bool, CommonError> {
+    let filtre = doc!{
+        "tuuid": tuuid,
+        "user_id": user_id,
+        "borrower": borrower,
+        "lease_date": {"$lt": expiry},
+    };
+    let ops = doc!{
+        "$currentDate": {"lease_date": true}
+    };
+
+    let collection = mongo.get_collection(NOM_COLLECTION_JOBS_LEASES)?;
+    let result = collection
+        .update_one(filtre, ops)
+        .upsert(true)
+        .await?;
+
+    // Returns true when a lease record is added or updated - this means the lease is successful
     Ok(result.modified_count == 1 || result.upserted_id.is_some())
 }
