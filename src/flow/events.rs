@@ -2,7 +2,7 @@ use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::constantes::Securite;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
-use millegrilles_common_rust::tracing::{error, info, warn};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::ChiffrageService;
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
@@ -12,6 +12,7 @@ use crate::external::mq::*;
 use crate::flow::file_events::{declencher_traitement_nouveau_fuuid, marquer_visites_fuuids, DelayedEventEmitterService};
 
 pub async fn process_events<M>(
+    chiffrage: &dyn ChiffrageService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     delayed_event_emitter_service: &DelayedEventEmitterService,
@@ -25,12 +26,24 @@ pub async fn process_events<M>(
         }
     };
     match action {
+        EVENT_KEYMASTER_CERTIFICATE => save_keymaster_certificate(chiffrage, wrapper).await,
         EVENEMENT_FILEHOST_NEWFUUID => filehost_new_fuuid(mongo, outbound, delayed_event_emitter_service, wrapper).await,
         _ => {
             warn!("Unknown action {} for process_events, skipping", action);
             Ok(())
         }
     }
+}
+
+async fn save_keymaster_certificate(
+    chiffrage: &dyn ChiffrageService,
+    wrapper: MessageValidated,
+) -> Result<(), CommonError> {
+    debug!("Saving keymaster certificate for encryption/fiche");
+    if let Err(e) = chiffrage.add_encryption_publickey(wrapper.certificate) {
+        warn!("Error saving keymaster certificate: {:?}", e);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
