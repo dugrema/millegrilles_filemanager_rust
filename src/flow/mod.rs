@@ -12,3 +12,4 @@ mod request_models;
 mod keys;
 pub mod transaction_models;
 pub mod file_events;
+pub mod file_jobs;

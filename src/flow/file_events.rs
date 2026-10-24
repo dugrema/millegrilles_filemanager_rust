@@ -9,14 +9,17 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::{bson, serde_json, tokio};
 use millegrilles_common_rust::tokio::select;
+use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
 use millegrilles_common_rust::tracing::{debug, error, info};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
+use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use serde::{Deserialize, Serialize};
 use crate::constants::*;
 use crate::external::mongo::*;
-use crate::external::mongo_struct::NodeFichierRepOwned;
+use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
+use crate::flow::file_jobs::{sauvegarder_job_video, BackgroundJob, BackgroundJobParams};
 use crate::flow::request_models::ResponseFichierRepVersion;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -342,6 +345,114 @@ pub async fn update_file_versions_quota(mongo: &dyn MongoDao, user_id: &str, fil
         .update_one(filtre, ops)
         .upsert(true)
         .await?;
+
+    Ok(())
+}
+
+pub async fn marquer_visites_fuuids(
+    mongo: &dyn MongoDao,
+    fuuids: &Vec<&str>,
+    date_visite: &DateTime<Utc>,
+    filehost_id: &str,
+) -> Result<(), CommonError> {
+    debug!("marquer_visites_fuuids  Visiter {} fuuids du filehost_id {}", fuuids.len(), filehost_id);
+
+    // Marquer versions
+    let filtre_versions = doc! { FIELD_FUUID: {"$in": fuuids} };
+    let ops = doc! {
+        "$set": { format!("visites.{}", filehost_id): date_visite },
+        "$unset": { "visites.nouveau": true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    collection_versions.update_many(filtre_versions, ops).await?;
+
+    // Marquer fichiersrep (date modification, requis pour pour sync)
+    let filtre_rep = doc! { CHAMP_FUUIDS_VERSIONS: {"$in": fuuids} };
+    let ops = doc! { "$currentDate": { FIELD_DATE_MODIFIED: true } };
+    let collection_rep = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    collection_rep.update_many(filtre_rep, ops).await?;
+
+    Ok(())
+}
+
+pub async fn declencher_traitement_nouveau_fuuid<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    fuuid: &str,
+    filehost_ids: &Vec<&str>
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let filtre = doc! { "fuuid": fuuid };
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let collection_versions = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+
+    // Find all tuuids that match this fuuid. Process independently.
+    // When this is a new file there should only be one. Later on processing is already complete.
+    let mut curseur = collection_versions.find(filtre).await?;
+    while let Some(r) = curseur.next().await {
+        let doc_fuuid = r?;
+
+        let cle_id = match doc_fuuid.cle_id.as_ref() {
+            Some(inner) => inner,
+            None => doc_fuuid.fuuid.as_str()
+        };
+
+        // let image_traitee = doc_fuuid.flag_media_traite;
+        let video_traite = doc_fuuid.flag_video_traite;
+
+        // Find a matching tuuid for the user_id/fuuid. If the user has copied the file multiple times,
+        // only one of the tuuid will be used. Since this is a new file, it should not be an issue.
+        let filtre_reps = doc!{"fuuids_versions": fuuid};
+        let mut cursor = collection_reps.find(filtre_reps).await?;
+        while let Some(r) = cursor.next().await {
+            let rep = r?;
+
+            let tuuid = rep.tuuid.as_str();
+            emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, tuuid).await?;
+
+            // Extract information for background job if all fields present
+            let job = match (doc_fuuid.format.as_ref(), doc_fuuid.nonce.as_ref()) {
+                (Some(format), Some(nonce)) => {
+                    Some(BackgroundJob::new(
+                        tuuid, 
+                        fuuid, 
+                        doc_fuuid.mimetype.as_str(), 
+                        filehost_ids,
+                        cle_id, 
+                        format.into(), 
+                        nonce
+                    ))
+                },
+                _ => None
+            };
+            
+            if let Some(mut job) = job {
+                if !video_traite {
+                    // Note : La job est uniquement creee si le format est video
+                    let params_initial = BackgroundJobParams {
+                        defaults: Some(true),
+                        thumbnails: Some(true),
+                        mimetype: None,
+                        codec_video: None,
+                        codec_audio: None,
+                        resolution_video: None,
+                        quality_video: None,
+                        bitrate_video: None,
+                        bitrate_audio: None,
+                        preset: None,
+                        audio_stream_idx: None,
+                        subtitle_stream_idx: None,
+                    };
+                    job.params = Some(params_initial);
+                    let user_id = rep.user_id.clone();
+                    job.user_id = Some(user_id);
+                    debug!("declencher_traitement_nouveau_fuuid Create new default video job for tuuid:{}/fuuid:{:?} ", tuuid, job.fuuid);
+                    sauvegarder_job_video(mongo, outbound, &job).await?;
+                }
+            }
+        }
+    }
 
     Ok(())
 }

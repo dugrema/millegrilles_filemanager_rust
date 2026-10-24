@@ -66,10 +66,8 @@ pub struct NodeFichierVersionOwned {
     pub flag_media: Option<String>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub flag_media_retry: Option<i32>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub flag_media_traite: Option<bool>,
-    #[serde(skip_serializing_if="Option::is_none")]
-    pub flag_video_traite: Option<bool>,
+    pub flag_media_traite: bool,
+    pub flag_video_traite: bool,
 
     // Information de chiffrage symmetrique (depuis 2024.3.0)
     #[serde(skip_serializing_if="Option::is_none")]

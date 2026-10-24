@@ -145,7 +145,9 @@ impl ApplicationService {
             match result {
                 Ok(message) => {
                     if let Err(e) = process_events(
-                        self.chiffrage.as_ref(),
+                        self.mongo.as_ref(),
+                        self.outbound.as_ref(),
+                        self.event_emitter_service.as_ref(),
                         message,
                     ).await {
                         error!("Ticker job failed: {}", e);
