@@ -44,6 +44,7 @@ pub const REQUEST_FILES_BY_TUUID: &str = "filesByTuuid";
 
 pub const TRANSACTION_NOUVELLE_VERSION: &str = "nouvelleVersion";
 pub const TRANSACTION_NOUVELLE_COLLECTION: &str = "nouvelleCollection";
+pub const TRANSACTION_NOUVELLE_COLLECTION_V2: &str = "nouvelleCollectionV2";
 pub const TRANSACTION_AJOUTER_FICHIERS_COLLECTION: &str = "ajouterFichiersCollection";
 pub const TRANSACTION_DEPLACER_FICHIERS_COLLECTION: &str = "deplacerFichiersCollection";
 pub const TRANSACTION_SUPPRIMER_DOCUMENTS: &str = "supprimerDocuments";

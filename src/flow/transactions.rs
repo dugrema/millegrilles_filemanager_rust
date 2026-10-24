@@ -11,6 +11,7 @@ use std::sync::Arc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::Utc;
 use millegrilles_common_rust::{bson, mongodb};
+use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongodb::options::{InsertOneModel, WriteModel};
 use crate::constants::DOMAIN_NAME;
 use crate::external::mongo_struct::NodeFichierRepOwned;
@@ -65,23 +66,43 @@ impl TransactionRouter for FileManagerTransactionRouter {
         wrapper: TransactionWrapper
     ) -> Result<TransactionOperationAggregator, CommonError> {
         match action.as_str() {
-            TRANSACTION_NOUVELLE_COLLECTION => new_collection(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_NOUVELLE_COLLECTION => new_collection(self.mongo.as_ref(), wrapper, true).await,
+            TRANSACTION_NOUVELLE_COLLECTION_V2 => new_collection(self.mongo.as_ref(), wrapper, false).await,
 
             _ => Err(CommonError::Str("Unknown transaction action"))
+        }
+    }
+
+    fn is_must_flush(&self, message: &MessageMilleGrillesOwned) -> bool {
+        let action = match message.routage.as_ref() {
+            Some(routing) => match routing.action.as_ref() {
+                Some(action) => action.as_str(),
+                None => return false
+            },
+            None => return false
+        };
+
+        // Use the action to match all legacy transactions that run database lookups. This prevents
+        // proper batching, all previous transactions must be flush before running the following
+        // action types.
+        match action {
+            TRANSACTION_NOUVELLE_COLLECTION => true,
+            _ => false
         }
     }
 }
 
 async fn new_collection(
     mongo: &dyn MongoDao,
-    wrapper: TransactionWrapper
+    wrapper: TransactionWrapper,
+    legacy_v1: bool,
 ) -> Result<TransactionOperationAggregator, CommonError> {
     let transaction: TransactionNouvelleCollection = wrapper.message.deserialize()?;
 
     let user_id = match transaction.user_id {
         Some(user_id) => {
             // New type, ensure the certificate is from filemanager
-            if ! wrapper.certificate.verifier_domaines(vec![DOMAIN_NAME.to_string()])? {
+            if legacy_v1 || ! wrapper.certificate.verifier_domaines(vec![DOMAIN_NAME.to_string()])? {
                 return Err(CommonError::Str("Wrong domain, new_collection transaction with user_id not allowed"))
             }
             user_id
@@ -103,7 +124,13 @@ async fn new_collection(
     let path_cuuids = match transaction.cuuids {
         Some(path_cuuids) => Some(path_cuuids),  // New type, path already fetched
         None => match transaction.cuuid {
-            Some(cuuid) => get_path_cuuid(mongo, &cuuid).await?,  // Old style, need to fetch from database
+            Some(cuuid) => {
+                // Old style, this will fail on restore if all previous transactions are not flushed
+                if ! legacy_v1 {
+                    return Err(CommonError::Str("Not supported for nouvelleCollectionV2"))
+                }
+                get_path_cuuid(mongo, &cuuid).await?
+            },
             None => None
         }
     };
@@ -131,6 +158,10 @@ async fn new_collection(
     );
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.batch_insertions = Some(vec![insertion]);
+
+    // Note: No need to put the legacy flag, this is only used to force a flush after the transaction is ready.
+    //       This transaction needs the flush to happen before it runs (for get_path_cuuid)
+    // aggregator.legacy = legacy_v1;
 
     Ok(aggregator)
 }

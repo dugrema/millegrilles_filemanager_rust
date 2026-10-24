@@ -123,7 +123,7 @@ async fn new_collection(
     // The unique id of the transaction is the new tuuid
     let tuuid = transaction.process_value(
         DOMAIN_NAME,
-        TRANSACTION_NOUVELLE_COLLECTION,
+        TRANSACTION_NOUVELLE_COLLECTION_V2,
         serde_json::to_value(transaction_value)?,
         None
     ).await?;
