@@ -1,9 +1,10 @@
+use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::file_events::{CollectionEventAggregator, DelayedEventEmitterService, emettre_evenement_maj_collection};
+use crate::flow::file_events::{emettre_evenement_maj_collection, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService};
 use crate::flow::keys::relay_attached_key;
-use crate::flow::transaction_models::TransactionNouvelleCollection;
+use crate::flow::transaction_models::{TransactionNouvelleCollection, TransactionNouvelleVersion};
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::dechiffrage::DataChiffre;
@@ -12,12 +13,14 @@ use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
-use millegrilles_common_rust::tracing::info;
+use millegrilles_common_rust::tracing::{info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
 use serde::Serialize;
+use crate::external::mongo::*;
+use crate::flow::maintenance::verifier_visites_topologies;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -40,14 +43,15 @@ pub async fn process_transaction<M,E>(
         MessageKind::Commande => {
             match action {
                 TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 _ => {
-                    info!("Unknown action {} for process_transaction, skipping", action);
+                    warn!("Unknown action {} for process_transaction, skipping", action);
                     Ok(())
                 }
             }
         },
         _ => {
-            info!("Unhandled message type with action {} for process_command, skipping", action);
+            warn!("Unhandled message type with action {} for process_command, skipping", action);
             Ok(())
         }
     }
@@ -88,19 +92,7 @@ async fn new_collection(
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
     };
 
-    // Save the new key with the keymaster
-    match attachments {
-        Some(mut attachements) => match attachements.remove("cle") {
-            Some(cle) => relay_attached_key(messaging, serde_json::from_value(cle)?).await?,
-            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "New collection key is missing")).await
-        },
-        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "New collection key is missing")).await
-    }
-
-    let tuuid = wrapper.message.id.clone();
-    // let delivery_info = wrapper.delivery_info.clone();
-
-    // Ajouter collection parent au besoin
+    // Add parent collection if required - may fail if parent is unknown
     let path_cuuids: Option<Vec<String>> = match command.cuuid.as_ref() {
         Some(cuuid) => {
             // Charger le cuuid pour ajouter path vers root
@@ -111,6 +103,15 @@ async fn new_collection(
         },
         None => None
     };
+
+    // Save the new key with the keymaster
+    match attachments {
+        Some(mut attachements) => match attachements.remove("cle") {
+            Some(cle) => relay_attached_key(messaging, serde_json::from_value(cle)?).await?,
+            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "New collection key is missing")).await
+        },
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "New collection key is missing")).await
+    }
 
     let transaction_value = TransactionNouvelleCollection {
         metadata: command.metadata,
@@ -144,4 +145,83 @@ async fn new_collection(
     delayed_event_emitter_service.emit(evenement_contenu).await?;
 
     outbound.respond(wrapper.delivery_info, ResponseNewCollection { ok: true, tuuid } ).await
+}
+
+async fn new_file_version<M>(
+    mongo: &M,
+    messaging: &dyn MessagingService,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    mut wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let attachments = wrapper.message.attachements.take();
+    let mut command: TransactionNouvelleVersion = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    // Verify that this file DOES NOT EXIST (by tuuid/fuuid)
+    if let Some(tuuid) = command.tuuid.as_ref() {
+        let collection_files = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+        let filter = doc! { FIELD_TUUID: tuuid };
+        if collection_files.find_one(filter).await?.is_some() {
+            return Err(CommonError::Str("File already exists (by tuuid)"))
+        }
+    }
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let filter = doc!{ FIELD_FUUID: &command.fuuid };
+    if collection_versions.find_one(filter).await?.is_some() {
+        return Err(CommonError::Str("File already exists (by fuuid)"))
+    }
+
+    // Add parent collection if required - may fail if parent is unknown
+    let path_cuuids: Vec<String> = {
+        // Charger le cuuid pour ajouter path vers root
+        match get_path_cuuid(mongo, command.cuuid.as_str()).await? {
+            Some(inner) => inner,
+            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Unknown directory (cuuid not found)")).await
+        }
+    };
+
+    // Update the command with path_cuuids and add the verified user_id.
+    // The transaction will be re-signed with the domain's certificate.
+    command.path_cuuids = Some(path_cuuids);
+    command.user_id = Some(user_id.clone());
+
+    // Save the new key with the keymaster
+    match attachments {
+        Some(mut attachements) => match attachements.remove("cle") {
+            Some(cle) => relay_attached_key(messaging, serde_json::from_value(cle)?).await?,
+            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "New collection key is missing")).await
+        },
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "New collection key is missing")).await
+    }
+
+    // The unique id of the transaction is the new tuuid
+    let new_id = transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_NOUVELLE_VERSION_V2,
+        serde_json::to_value(&command)?,
+        None
+    ).await?;
+
+    // Determine the new tuuid based on the command
+    let tuuid = command.tuuid.unwrap_or_else(|| new_id);
+    if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, tuuid.as_str()).await {
+        warn!("Error sending out file/collection update event: {:?}", e);
+    };
+
+    // Emit file claim - allows it to be synchronized to all filehosts immediately
+    if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid.as_str()]).await {
+        warn!("Error claiming new file version {}: {:?}", tuuid, e);
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }

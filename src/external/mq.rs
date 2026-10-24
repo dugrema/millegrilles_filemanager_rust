@@ -43,6 +43,7 @@ pub const REQUEST_SYNC_DIRECTORY: &str = "syncDirectory";
 pub const REQUEST_FILES_BY_TUUID: &str = "filesByTuuid";
 
 pub const TRANSACTION_NOUVELLE_VERSION: &str = "nouvelleVersion";
+pub const TRANSACTION_NOUVELLE_VERSION_V2: &str = "nouvelleVersionV2";
 pub const TRANSACTION_NOUVELLE_COLLECTION: &str = "nouvelleCollection";
 pub const TRANSACTION_NOUVELLE_COLLECTION_V2: &str = "nouvelleCollectionV2";
 pub const TRANSACTION_AJOUTER_FICHIERS_COLLECTION: &str = "ajouterFichiersCollection";

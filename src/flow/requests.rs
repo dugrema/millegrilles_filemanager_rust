@@ -9,7 +9,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::{FormatChif
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
-use millegrilles_common_rust::tracing::{debug, error, info};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::ConfigService;
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
@@ -47,13 +47,13 @@ pub async fn process_request<M>(
                 REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
 
                 _ => {
-                    info!("Unknown action {} for process_request, skipping", action);
+                    warn!("Unknown action {} for process_request, skipping", action);
                     Ok(())
                 }
             }
         },
         _ => {
-            info!("Unhandled message type with action {} for process_request, skipping", action);
+            warn!("Unhandled message type with action {} for process_request, skipping", action);
             Ok(())
         }
     }

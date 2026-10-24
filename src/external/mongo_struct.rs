@@ -21,7 +21,8 @@ pub struct NodeFichierRepOwned {
     pub metadata: DataChiffre,
 
     pub flag_index: bool,
-    pub flag_rag: Option<bool>,
+    pub flag_rag: bool,
+    pub flag_summary: bool,
 
     // Champs pour type_node Fichier
     pub mimetype: Option<String>,
@@ -33,20 +34,10 @@ pub struct NodeFichierRepOwned {
     pub path_cuuids: Option<Vec<String>>,
 
     // Mapping date - requis pour sync
-    #[serde(
-        default,
-        rename = "modified",
-        skip_serializing_if = "Option::is_none",
-        with="option_chrono_04_datetime"
-    )]
-    pub derniere_modification: Option<DateTime<Utc>>,
-    #[serde(
-        default,
-        rename = "created",
-        skip_serializing_if = "Option::is_none",
-        with="option_chrono_04_datetime"
-    )]
-    pub date_creation: Option<DateTime<Utc>>,
+    #[serde(with="FromChrono04DateTime")]
+    pub created: DateTime<Utc>,
+    #[serde(with="FromChrono04DateTime")]
+    pub modified: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,13 +53,17 @@ pub struct NodeFichierVersionOwned {
 
     #[serde(with="map_chrono_datetime_as_bson_datetime")]
     pub visites: HashMap<String, DateTime<Utc>>,
+    #[serde(with="FromChrono04DateTime")]
+    pub last_visit_verification: DateTime<Utc>,
 
     // Mapping date
-    #[serde(default, rename(deserialize = "modified"), with="option_chrono_04_datetime")]
-    pub derniere_modification: Option<DateTime<Utc>>,
+    #[serde(default, with="FromChrono04DateTime")]
+    pub created: DateTime<Utc>,
+    #[serde(default, with="FromChrono04DateTime")]
+    pub modified: DateTime<Utc>,
 
     #[serde(skip_serializing_if="Option::is_none")]
-    flag_media: Option<String>,
+    pub flag_media: Option<String>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub flag_media_retry: Option<i32>,
     #[serde(skip_serializing_if="Option::is_none")]
@@ -93,10 +88,10 @@ pub struct MediaOwnedRow {
     pub user_id: String,
 
     // Mapping date
-    #[serde(rename="_mg-creation", with="FromChrono04DateTime")]
-    pub creation: DateTime<Utc>,
-    #[serde(rename="_mg-derniere-modification", with="FromChrono04DateTime")]
-    pub derniere_modification: DateTime<Utc>,
+    #[serde(with="FromChrono04DateTime")]
+    pub created: DateTime<Utc>,
+    #[serde(with="FromChrono04DateTime")]
+    pub modified: DateTime<Utc>,
 
     #[serde(skip_serializing_if="Option::is_none")]
     pub height: Option<u32>,

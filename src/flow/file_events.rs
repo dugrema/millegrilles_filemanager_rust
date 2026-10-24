@@ -6,7 +6,7 @@ use millegrilles_common_rust::constantes::Securite;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
-use millegrilles_common_rust::mongo_dao::MongoDao;
+use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::{bson, serde_json, tokio};
 use millegrilles_common_rust::tokio::select;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
@@ -260,6 +260,32 @@ impl DelayedEventEmitterService {
     }
 }
 
+pub async fn emettre_evenement_maj_fichier<M>(
+    mongo: &M,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    tuuid: &str,
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    debug!("grosfichiers.emettre_evenement_maj_fichier Emettre evenement maj pour fichier {}", tuuid);
+
+    // Charger fichier
+    let filtre = doc! {CHAMP_TUUID: tuuid};
+    let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let doc_fichier = match collection.find_one(filtre).await? {
+        Some(doc_fichier) => doc_fichier,
+        None => return Err(CommonError::String(format!("grosfichiers.emettre_evenement_maj_fichier Document {} introuvable", tuuid)))
+    };
+
+    if let Some(cuuids) = doc_fichier.path_cuuids.as_ref() {
+        if let Some(cuuid) = cuuids.first() {
+            let evenement = CollectionEventAggregator::new(cuuid.as_str())
+                .fichiers_modifies(vec![tuuid.to_owned()]);
+            delayed_event_emitter_service.emit(evenement).await?;
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn emettre_evenement_maj_collection(
     mongo: &dyn MongoDao,
     outbound: &MessageOutboundFacade,
@@ -298,6 +324,24 @@ pub async fn emettre_evenement_maj_collection(
             .collections_modifiees(vec![tuuid.to_string()]);
         delayed_event_emitter_service.emit(evenement_modif).await?;
     }
+
+    Ok(())
+}
+
+pub async fn update_file_versions_quota(mongo: &dyn MongoDao, user_id: &str, file_size: i64) -> Result<(), CommonError> {
+    // Update/insert the user quota information
+    let collection_quotas = mongo.get_collection(NOM_COLLECTION_QUOTAS_USAGERS)?;
+    let filtre = doc!{ FIELD_USER_ID: user_id };
+    let ops = doc!{
+        "$setOnInsert": { FIELD_DATE_CREATED: bson::datetime::DateTime::now() },
+        "$inc": { "bytes_total_versions": file_size, "nombre_total_versions": 1 },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+
+    collection_quotas
+        .update_one(filtre, ops)
+        .upsert(true)
+        .await?;
 
     Ok(())
 }

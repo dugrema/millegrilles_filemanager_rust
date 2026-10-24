@@ -1,4 +1,6 @@
 use millegrilles_common_rust::dechiffrage::DataChiffre;
+use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
+use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionformatchiffragestr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -9,4 +11,80 @@ pub struct TransactionNouvelleCollection {
     // New fields used since 2026-10-23, avoids having to look-up the path of cuuids on replay
     pub cuuids: Option<Vec<String>>,
     pub user_id: Option<String>,    // When present, use this value instaad of certificate for user_id
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionNouvelleVersion {
+    pub fuuid: String,
+    pub cuuid: String,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub tuuid: Option<String>,  // uuid de la premiere commande/transaction comme collateur de versions
+    pub mimetype: String,
+    pub metadata: DataChiffre,
+    pub taille: u64,
+
+    // Valeurs de chiffrage symmetrique (depuis 2024.3)
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub cle_id: Option<String>,
+    #[serde(default, with="optionformatchiffragestr", skip_serializing_if="Option::is_none")]
+    pub format: Option<FormatChiffrage>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub nonce: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub verification: Option<String>,
+
+    // Full path cuuids, since 2026.7 (internal only)
+    pub path_cuuids: Option<Vec<String>>,
+    pub user_id: Option<String>,    // only allowed with re-signed transaction V2
+}
+
+pub fn is_mimetype_video<S>(mimetype: S) -> bool
+where S: AsRef<str>
+{
+    const VIDEO_START: &'static str = "video/";
+    const VIDEO_MIMETYPES: [&'static str; 5] = [
+        "application/vnd.rn-realmedia",
+        "application/vnd.rn-realplayer",
+        "application/x-mplayer2",
+        "application/x-shockwave-flash",
+        "application/vnd.ms-asf"
+    ];
+
+    let mimetype_str = mimetype.as_ref();
+
+    if mimetype_str.starts_with(VIDEO_START) {
+        true
+    } else {
+        for mt in VIDEO_MIMETYPES {
+            if mt == mimetype_str {
+                return true
+            }
+        }
+        false
+    }
+}
+
+pub fn get_flags_media(mimetype: &str) -> (bool, bool, Option<String>, bool) {
+    let mut flag_media_traite = true;
+    let mut flag_video_traite = true;
+    let mut flag_media = None;
+    let mut flag_summary = true;
+
+    // Information optionnelle pour accelerer indexation/traitement media
+    if mimetype.starts_with("image/") {
+        flag_media_traite = false;
+        flag_media = Some("image".to_string());
+        flag_summary = false;
+    } else if is_mimetype_video(mimetype) {
+        flag_media_traite = true;  // Thumbnails generes avec le video depuis 2024.9
+        flag_video_traite = false;
+        flag_media = Some("video".to_string());
+    } else if mimetype == "application/pdf" {
+        flag_media_traite = false;
+        flag_media = Some("poster".to_string());
+        flag_summary = false;
+    } else if mimetype.starts_with("text/") {
+        flag_summary = true;
+    }
+    (flag_media_traite, flag_video_traite, flag_media, flag_summary)
 }

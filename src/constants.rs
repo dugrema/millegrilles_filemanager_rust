@@ -8,3 +8,5 @@ pub const DELEGATION_OWNER: &str = "proprietaire";
 
 pub const ROLE_USAGER: &str = "usager";
 pub const ROLE_NAVIGATEUR: &str = "navigateur";
+
+pub const COMMAND_CLAIM_FILEHOST_VISITS: &str = "claimAndFilehostVisits";

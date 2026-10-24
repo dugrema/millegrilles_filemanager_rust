@@ -331,7 +331,7 @@ pub async fn get_complete_files(
                 taille: version.taille,
                 fuuids_reclames: version.fuuids_reclames,
                 visites: version.visites,
-                derniere_modification: version.derniere_modification,
+                derniere_modification: Some(version.modified),
                 height: None,
                 width: None,
                 duration: None,

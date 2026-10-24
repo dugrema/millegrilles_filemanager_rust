@@ -1,15 +1,19 @@
+use std::collections::HashMap;
 use crate::constants::*;
-use crate::external::mongo::COLLECTION_NAME_REDOLOG;
+use crate::external::mongo::*;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::{Datelike, Duration, Timelike, Utc, Weekday};
 use millegrilles_common_rust::common_messages::BackupEvent;
+use millegrilles_common_rust::constantes::*;
 use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::messages_generiques::MessageCedule;
 use millegrilles_common_rust::mongo_dao::MongoDao;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::{BackupService, PresenceService};
+use serde::{Deserialize, Serialize};
 
 pub async fn process_ticker_job(
     mongo: &dyn MongoDao,
@@ -96,4 +100,48 @@ pub async fn validate_ticker(trigger: &MessageValidated) -> Result<(), CommonErr
         return Err(CommonError::Str("Ticker message without ticker (ceduleur) role, ignoring"));
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct RequeteFuuidsVisites<'a> {
+    fuuids: &'a Vec<&'a str>,
+    batch_no: Option<usize>,
+    done: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct RowFuuidVisit {
+    pub fuuid: String,
+    pub visits: HashMap<String, i64>,
+}
+
+#[derive(Deserialize)]
+pub struct RequeteGetVisitesFuuidsResponse {
+    pub ok: bool,
+    pub err: Option<String>,
+    pub visits: Option<Vec<RowFuuidVisit>>,
+    pub unknown: Option<Vec<String>>
+}
+
+pub async fn verifier_visites_topologies(
+    outbound: &MessageOutboundFacade,
+    fuuids: &Vec<&str>
+) -> Result<RequeteGetVisitesFuuidsResponse, CommonError> {
+    let request = RequeteFuuidsVisites { fuuids, batch_no: None, done: None };
+
+    let routing = RoutageMessageAction::builder(
+        DOMAINE_TOPOLOGIE,
+        COMMAND_CLAIM_FILEHOST_VISITS,
+        vec![Securite::L3Protege]
+    ).build();
+    match outbound.send_command(routing, request).await? {
+        Some(response) => {
+            if let (true, err) = response.is_err()? {
+                Err(CommonError::String(format!("Error on command claimAndFilehostVisits: {:?}", err)))
+            } else {
+                Ok(response.message.deserialize::<RequeteGetVisitesFuuidsResponse>()?)
+            }
+        },
+        None => Err(CommonError::Str("No response received for claimAndFilehostVisits command"))
+    }
 }
