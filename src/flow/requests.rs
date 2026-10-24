@@ -219,7 +219,7 @@ async fn request_sync_directory<M>(
         sync_response.keys = Some(decryption_key_type);
     }
 
-    outbound.respond(wrapper.delivery_info, sync_response).await
+    outbound.respond_encrypted(wrapper.delivery_info, sync_response, wrapper.certificate.as_ref()).await
 }
 
 #[derive(Deserialize)]
@@ -367,5 +367,5 @@ async fn request_files_by_tuuid<M>(
         response.keys = Some(decryption_key_type);
     }
 
-    outbound.respond(wrapper.delivery_info, response).await
+    outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
 }
