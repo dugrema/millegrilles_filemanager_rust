@@ -85,7 +85,7 @@ impl AppContext {
 
         let event_emitter_service = Arc::new(DelayedEventEmitterService::new(
             outbound.clone(),
-            Duration::milliseconds(800),
+            Duration::milliseconds(300),
             30
         ));
 
