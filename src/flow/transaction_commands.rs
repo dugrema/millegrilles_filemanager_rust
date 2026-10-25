@@ -24,7 +24,7 @@ use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, Mes
 use serde::Serialize;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing};
+use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing, set_flag_video_traite};
 use crate::flow::maintenance::verifier_visites_topologies;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
@@ -68,7 +68,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
                 // Media
-                TRANSACTION_ASSOCIER_VIDEO => todo!(),
+                TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_VIDEO => todo!(),
                 TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
@@ -578,6 +578,62 @@ async fn delete_file_comment<M>(
 
     if let Err(e) = trigger_file_indexing(outbound).await {
         warn!("update_file_text_content Error emitting file indexing trigger: {:?}", e);
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn associate_video_conversion<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionAssocierVideo = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_MEDIA.to_string()])? ||
+        ! wrapper.certificate.verifier_exchanges(vec![Securite::L2Prive])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    };
+
+    // Check that file exists and the user has access to modify
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &command.user_id };
+    if collection_reps.find_one(filtre_reps).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    }
+
+    // Process transaction
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    // Remove video job
+    let job_id = match command.job_id.as_ref() {Some(inner)=>Some(inner.as_str()), None=>None};
+    let tuuid = match command.tuuid.as_ref() {Some(inner)=>Some(inner.as_str()), None=>None};
+    set_flag_video_traite(mongo, tuuid, command.fuuid.as_str(), job_id).await?;
+
+    // Touch - s'assure que le client va voir que le fichier a ete modifie (sync)
+    if let Err(e) = touch_fichiers_rep(mongo, &vec![command.fuuid.as_str()]).await {
+        error!("commande_associer_video Erreur touch_fichiers_rep {:?}/{:?} : {:?}", command.user_id, command.fuuid, e);
+    }
+
+    // Emettre fichier pour que tous les clients recoivent la mise a jour
+    if let Some(tuuid) = command.tuuid.as_ref() {
+        if let Err(e) = emit_rep_update_event(
+            mongo,
+            outbound,
+            delayed_event_emitter_service,
+            tuuid.as_str(),
+            command.user_id.as_str()
+        ).await {
+            warn!("commande_associer_video Erreur emettre_evenement_maj_fichier : {:?}", e);
+        }
+    }
+
+    // Emit file claim - allows it to be synchronized to all filehosts immediately
+    if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid_video.as_str()]).await {
+        warn!("commande_associer_conversions Error claiming new video for file {:?}: {:?}", command.tuuid, e);
     }
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await

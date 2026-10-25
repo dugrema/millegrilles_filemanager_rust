@@ -738,3 +738,36 @@ pub async fn trigger_file_indexing(outbound: &MessageOutboundFacade) -> Result<(
     outbound.emit_event(routing, EventTriggerIndexing{}).await?;
     Ok(())
 }
+
+pub async fn set_flag_video_traite(
+    mongo: &dyn MongoDao,
+    tuuid: Option<&str>,
+    fuuid: &str,
+    job_id: Option<&str>
+) -> Result<(), CommonError> {
+    let mut filtre_video = doc! {"fuuid": fuuid};
+    if let Some(tuuid) = tuuid.as_ref() {
+        filtre_video.insert("tuuids", tuuid.to_string());
+    }
+
+    // Set flag versionFichiers
+    let collection = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let ops = doc! {
+        "$set": {
+            CHAMP_FLAG_VIDEO_TRAITE: true,
+            CHAMP_FLAG_MEDIA_TRAITE: true,  // legacy pour eviter de laisser un flag actif pre release-2024.9
+        },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    collection.update_many(filtre_video.clone(), ops).await?;
+
+    // Supprimer job image
+    let filtre_job = match job_id {
+        Some(inner) => doc!{"job_id": inner},
+        None => filtre_video
+    };
+    let collection = mongo.get_collection(NOM_COLLECTION_VIDEO_JOBS)?;
+    collection.delete_many(filtre_job).await?;
+
+    Ok(())
+}

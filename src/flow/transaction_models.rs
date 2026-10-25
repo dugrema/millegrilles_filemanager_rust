@@ -140,3 +140,39 @@ pub struct TransactionDeleteFileComment {
     pub tuuid: String,
     pub comment_id: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionAssocierVideo {
+    pub tuuid: Option<String>,
+    pub fuuid: String,
+    pub user_id: String,
+    pub mimetype: String,
+    pub codec: String,
+    pub fuuid_video: String,
+    pub job_id: Option<String>,
+
+    // Metadata video transcode
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub bitrate: Option<u32>,
+    pub quality: Option<i32>,
+    pub taille_fichier: u64,
+
+    // Information dechiffrage - note : fuuid -> ref_hachage_bytes
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub header: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub nonce: Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub cle_id: Option<String>,
+
+    /// Fix bug videas verticaux. Ajoute dans version 2023.7.4
+    pub cle_conversion: Option<String>,
+
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub audio_stream_idx: Option<u32>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub subtitle_stream_idx: Option<u32>,
+}

@@ -17,7 +17,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use crate::constants::*;
-use crate::external::mongo_struct::{FileComment, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mongo_struct::{FileComment, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned, VideoDetail};
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
 use crate::flow::transaction_models::*;
@@ -94,8 +94,8 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
             // Media
-            TRANSACTION_ASSOCIER_VIDEO => todo!(),
-            TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_convertions(self.mongo.as_ref(), wrapper, true).await,
+            TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_SUPPRIMER_VIDEO => todo!(),
             TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
             TRANSACTION_VIDEO_SUPPRIMER_JOB_V2 => todo!(),
@@ -103,7 +103,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
 
             // Media - internal only (no command)
-            TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_convertions(self.mongo.as_ref(), wrapper, false).await,
+            TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_conversions(self.mongo.as_ref(), wrapper, false).await,
 
             // Sharing
             TRANSACTION_AJOUTER_CONTACT_LOCAL => todo!(),
@@ -355,7 +355,7 @@ async fn new_file_version<M>(
     Ok(aggregator)
 }
 
-async fn associate_file_convertions<M>(
+async fn associate_file_conversions<M>(
     mongo: &M,
     wrapper: TransactionWrapper,
     legacy_v1: bool,
@@ -731,6 +731,109 @@ async fn delete_file_comment(
         WriteModel::UpdateOne(
             UpdateOneModel::builder()
                 .namespace(collection.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        )
+    );
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn associate_video_conversion(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionAssocierVideo = wrapper.message.deserialize()?;
+
+    let created = bson::DateTime::from_chrono(wrapper.message.estampille.clone());
+
+    let video_detail = VideoDetail {
+        fuuid: transaction.fuuid.clone(),
+        fuuid_video: transaction.fuuid_video.clone(),
+        taille_fichier: transaction.taille_fichier,
+        mimetype: transaction.mimetype.clone(),
+        codec: transaction.codec.clone(),
+        cle_conversion: transaction.cle_conversion.clone(),
+        width: transaction.width,
+        height: transaction.height,
+        bitrate: transaction.bitrate,
+        quality: transaction.quality,
+        audio_stream_idx: transaction.audio_stream_idx,
+        subtitle_stream_idx: transaction.subtitle_stream_idx,
+        header: transaction.header,
+        format: transaction.format,
+        nonce: transaction.nonce,
+        cle_id: transaction.cle_id,
+    };
+
+    let cle_video = match transaction.cle_conversion {
+        Some(inner) => inner,  // Nouveau avec 2023.7.4
+        None => {
+            // Note : avant 2023.7.4 (et media 2023.7.4), la cle_video n'etait pas fournie
+            //        cause un probleme avec les videos verticaux.
+            let resolution = match transaction.height {
+                Some(height) => match transaction.width {
+                    Some(width) => {
+                        // La resolution est le plus petit des deux nombres
+                        if width < height {
+                            width
+                        } else {
+                            height
+                        }
+                    },
+                    None => height,
+                },
+                None => 0
+            };
+            let bitrate_quality = {
+                match &transaction.quality {
+                    Some(q) => q.to_owned(),
+                    None => match &transaction.bitrate {
+                        Some(b) => b.to_owned() as i32,
+                        None => 0
+                    }
+                }
+            };
+            format!("{};{};{}p;{}", &transaction.mimetype, &transaction.codec, resolution, bitrate_quality)
+        }
+    };
+
+    let mut models = Vec::with_capacity(2);
+
+    let filter = doc!{ FIELD_FUUID: &transaction.fuuid, FIELD_USER_ID: &transaction.user_id };
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+    let ops = doc!{
+        "$set": {"anime": true, format!("video.{}", cle_video): bson::serialize_to_document(&video_detail)?},
+        "$setOnInsert": { FIELD_DATE_CREATED: &created },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .upsert(true)
+                .namespace(collection_media.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        )
+    );
+
+    // MAJ de la version du fichier
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let filter = doc!{ FIELD_FUUID: transaction.fuuid };
+    let ops = doc! {
+        "$set": { CHAMP_FLAG_VIDEO_TRAITE: true },
+        "$addToSet": { CHAMP_FUUIDS_RECLAMES: transaction.fuuid_video },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_versions.namespace())
                 .filter(filter)
                 .update(ops)
                 .build()
