@@ -70,11 +70,14 @@ async fn command_lease_files_for_image<M>(
     match get_batch_of_fichiersversion_leases(mongo, outbound, request, CHAMP_FLAG_MEDIA_TRAITE).await {
         Ok(response) => {
             // Encrypt response, it contains secret keys
-            outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
+            match response {
+                Some(response) => outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await,
+                None => outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "No files available")).await
+            }
         },
         Err(e) => {
             info!("command_lease_files_for_image Error: {:?}", e);
-            outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "No files available")).await
+            outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await
         }
     }
 }
@@ -100,7 +103,10 @@ async fn command_lease_files_for_indexing<M>(
         true
     ).await {
         Ok(response) => {
-            outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
+            match response {
+                Some(response) => outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await,
+                None => outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "No files available")).await
+            }
         },
         Err(e) => {
             info!("command_lease_files_for_indexing Error: {:?}", e);

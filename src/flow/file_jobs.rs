@@ -319,7 +319,7 @@ pub async fn get_batch_of_fichiersversion_leases<M>(
     outbound: &MessageOutboundFacade,
     request: RequestLeaseForBatchOperation,
     borrower: &str,
-)  -> Result<VersionLeasesResponse, CommonError> where M: MongoDaoTyped {
+)  -> Result<Option<VersionLeasesResponse>, CommonError> where M: MongoDaoTyped {
     let expiry = Utc::now() - Duration::seconds(300);
     let batch_size = request.batch_size.unwrap_or(5);
 
@@ -344,10 +344,7 @@ pub async fn get_batch_of_fichiersversion_leases<M>(
         }
     };
 
-    match lease_batch_fichiersversion(mongo, outbound, &expiry, borrower, filter, batch_size).await? {
-        Some(inner) => Ok(inner),
-        None => Err(CommonError::Str("No files available"))
-    }
+    Ok(lease_batch_fichiersversion(mongo, outbound, &expiry, borrower, filter, batch_size).await?)
 }
 
 /// Lease a batch of files based on a FichiersRep filtre.
@@ -478,7 +475,7 @@ pub async fn get_batch_of_fichiersrep_leases<M>(
     request: RequestLeaseForBatchOperation,
     borrower: &str,
     include_comments: bool
-) -> Result<LeasesResponse, CommonError> where M: MongoDaoTyped
+) -> Result<Option<LeasesResponse>, CommonError> where M: MongoDaoTyped
 {
     let expiry = Utc::now() - Duration::minutes(5);
     let batch_size = request.batch_size.unwrap_or(5);
@@ -490,10 +487,8 @@ pub async fn get_batch_of_fichiersrep_leases<M>(
             {borrower: false},
         ]
     };
-    match lease_batch_fichiersrep(mongo, outbound, &expiry, borrower, filtre, batch_size, false, include_comments).await? {
-        Some(inner) => Ok(inner),
-        None => Err(CommonError::Str("No files available"))
-    }
+
+    Ok(lease_batch_fichiersrep(mongo, outbound, &expiry, borrower, filtre, batch_size, false, include_comments).await?)
 }
 
 
