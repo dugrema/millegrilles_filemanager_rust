@@ -729,8 +729,8 @@ async fn delete_file_reps<M>(
 
     // Separate the directories from the files.
     let collection_fichierrep = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
-    let filtre = doc!{ 
-        FIELD_TUUID: { "$in": &command.tuuids } 
+    let filtre = doc!{
+        FIELD_TUUID: { "$in": &command.tuuids }
     };
     let mut cursor = collection_fichierrep.find(filtre).await?;
     let mut files = Vec::new();
@@ -801,7 +801,7 @@ async fn delete_file_reps<M>(
     let mut session = mongo.get_session().await?;
     session.start_transaction().await?;
 
-    // Make a list of all files that will be affected. 
+    // Make a list of all files that will be affected.
     // Those will be sent in (potentially) batched transactions up-front. This removes the
     // files explicitly from the versions collection.
     // This is also for post-transaction cleanup (search index, events).
@@ -819,7 +819,7 @@ async fn delete_file_reps<M>(
             continue
         }
         subfiles.push(row.tuuid.to_owned());
-        
+
         if subfiles.len() == 5_000 {
             // Submit as a batch
             let transaction_value = TransactionDeleteV3 {
@@ -832,13 +832,13 @@ async fn delete_file_reps<M>(
             };
             subfiles = Vec::with_capacity(5_000);
             transaction.process_value(
-                DOMAIN_NAME, 
-                TRANSACTION_DELETE_V3, 
-                serde_json::to_value(transaction_value)?, 
+                DOMAIN_NAME,
+                TRANSACTION_DELETE_V3,
+                serde_json::to_value(transaction_value)?,
                 Some(&mut session)
             ).await?;
         }
-        
+
         let cuuid = match row.path_cuuids.as_ref() {
             Some(path_cuuids) => match path_cuuids.get(0) {
                 Some(cuuid) => cuuid.as_str(),
@@ -853,10 +853,14 @@ async fn delete_file_reps<M>(
             }
         }
     }
-    
+
+    // Inject message in new command but remove certificate
+    let mut message_clone = wrapper.message.clone();
+    message_clone.certificat = None;
+
     // Create a new transaction with information to process
     let transaction_value = TransactionDeleteV3 {
-        command: Some(wrapper.message.clone()),
+        command: Some(message_clone),
         directories: match directories.len() {
             0 => None,
             _ => Some(directories)
@@ -877,15 +881,15 @@ async fn delete_file_reps<M>(
     };
 
     transaction.process_value(
-        DOMAIN_NAME, 
-        TRANSACTION_DELETE_V3, 
-        serde_json::to_value(transaction_value)?, 
+        DOMAIN_NAME,
+        TRANSACTION_DELETE_V3,
+        serde_json::to_value(transaction_value)?,
         Some(&mut session)
     ).await?;
 
     // Operations processed, commit session
     session.commit_transaction().await?;
-    
+
     debug!("commande_supprimer_documents Post transaction cleanup for : {:?}", tuuids_by_cuuid);
 
     // Emettre evenements supprime par cuuid
