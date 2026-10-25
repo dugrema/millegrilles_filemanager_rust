@@ -20,7 +20,7 @@ use crate::constants::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion, TransactionAssocierConversions, TransactionDecrireFichier};
+use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion, TransactionAssocierConversions, TransactionDecrireFichier, TransactionDecrireCollection};
 use crate::models::TypeNode;
 
 pub struct FileManagerTransactionService {
@@ -75,7 +75,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_NOUVELLE_VERSION => new_file_version(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_NOUVELLE_VERSION_V2 => new_file_version(self.mongo.as_ref(), wrapper, false).await,
             TRANSACTION_DECRIRE_FICHIER => update_file_metadata(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_DECRIRE_COLLECTION => todo!(),
+            TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
             TRANSACTION_DELETE_FILE_COMMENT => todo!(),
             TRANSACTION_FILE_SUMMARY => todo!(),
@@ -487,7 +487,7 @@ async fn update_file_metadata(
     };
 
     let mut updates = Vec::with_capacity(3);
-    
+
     // Modifier metadata
     if let Some(metadata) = transaction.metadata {
         let metadata_bson = match bson::serialize_to_document(&metadata) {
@@ -534,6 +534,46 @@ async fn update_file_metadata(
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(updates);
+
+    Ok(aggregator)
+}
+
+async fn update_collection_metadata(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionDecrireCollection = wrapper.message.deserialize()?;
+
+    let tuuid = transaction.tuuid.as_str();
+    let filter = doc! { CHAMP_TUUID: tuuid };
+
+    let doc_metadata = match bson::serialize_to_document(&transaction.metadata) {
+        Ok(d) => d,
+        Err(e) => Err(format!("transactions.transaction_decrire_collection Erreur conversion transaction : {:?}", e))?
+    };
+
+    let set_ops = doc! {
+        "metadata": doc_metadata,
+        CHAMP_FLAG_INDEX: false,
+    };
+
+    let ops = doc! {
+        "$set": set_ops,
+        "$unset": { CHAMP_FLAG_INDEX_RETRY: true, CHAMP_FLAG_INDEX_ERREUR: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let update_model_versions = WriteModel::UpdateOne(
+        UpdateOneModel::builder()
+            .upsert(true)
+            .namespace(collection.namespace())
+            .filter(filter)
+            .update(ops)
+            .build()
+    );
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(vec![update_model_versions]);
 
     Ok(aggregator)
 }

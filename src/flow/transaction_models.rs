@@ -117,3 +117,9 @@ pub struct TransactionDecrireFichier {
     pub metadata: Option<DataChiffre>,
     pub mimetype: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionDecrireCollection {
+    pub tuuid: String,
+    pub metadata: Option<DataChiffre>,
+}

@@ -51,7 +51,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DECRIRE_FICHIER => update_file_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_DECRIRE_COLLECTION => todo!(),
+                TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
                 TRANSACTION_DELETE_FILE_COMMENT => todo!(),
                 TRANSACTION_FILE_SUMMARY => todo!(),
@@ -320,7 +320,7 @@ async fn update_file_metadata<M>(
     transaction: &FileManagerTransactionService,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    let mut command: TransactionDecrireFichier = wrapper.message.deserialize()?;
+    let command: TransactionDecrireFichier = wrapper.message.deserialize()?;
 
     // Authorization, includes checking for shared folder access (impersonating other user_id for request)
     let user_id = match wrapper.certificate.get_user_id()? {
@@ -433,6 +433,33 @@ async fn update_file_metadata<M>(
     if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, &tuuid).await {
         warn!("transaction_decire_fichier Erreur emettre_evenement_maj_fichier : {:?}", e);
     }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn update_collection_metadata<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionDecrireCollection = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    // Emettre fichier pour que tous les clients recoivent la mise a jour
+    emettre_evenement_maj_collection(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
 }
