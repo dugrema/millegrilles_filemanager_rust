@@ -3,7 +3,7 @@ use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::file_events::{emettre_evenement_maj_collection, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
+use crate::flow::file_events::{emit_rep_update_event, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
 use crate::flow::keys::relay_attached_key;
 use crate::flow::transaction_models::*;
 use crate::flow::transactions::FileManagerTransactionService;
@@ -19,7 +19,7 @@ use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
-use millegrilles_common_rust::v3::models::ErrorMessage;
+use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
 use serde::Serialize;
 use crate::external::mongo::*;
@@ -53,7 +53,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_DECRIRE_FICHIER => update_file_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_DELETE_FILE_COMMENT => todo!(),
+                TRANSACTION_DELETE_FILE_COMMENT => delete_file_comment(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_FILE_SUMMARY => todo!(),
 
                 // Moving files
@@ -175,7 +175,7 @@ async fn new_collection(
     ).await?;
 
     // Emettre fichier pour que tous les clients recoivent la mise a jour
-    emettre_evenement_maj_collection(
+    emit_rep_update_event(
         mongo,
         outbound,
         delayed_event_emitter_service,
@@ -499,7 +499,7 @@ async fn update_collection_metadata<M>(
     transaction.process_transaction(wrapper.into(), None).await?;
 
     // Emettre fichier pour que tous les clients recoivent la mise a jour
-    emettre_evenement_maj_collection(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
+    emit_rep_update_event(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
 }
@@ -535,7 +535,46 @@ async fn update_file_text_content<M>(
     transaction.process_transaction(wrapper.into(), None).await?;
 
     // Emit file modified event
-    emettre_evenement_maj_collection(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
+    emit_rep_update_event(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
+
+    if let Err(e) = trigger_file_indexing(outbound).await {
+        warn!("update_file_text_content Error emitting file indexing trigger: {:?}", e);
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn delete_file_comment<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionDeleteFileComment = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    // Check that file exists and the user has access to modify
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &user_id };
+    if collection_reps.find_one(filtre_reps).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    }
+
+    // Process transaction
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    // Emit file modified event
+    emit_rep_update_event(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
 
     if let Err(e) = trigger_file_indexing(outbound).await {
         warn!("update_file_text_content Error emitting file indexing trigger: {:?}", e);

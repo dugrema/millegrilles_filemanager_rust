@@ -306,7 +306,7 @@ pub async fn emettre_evenement_maj_fichier<M>(
     Ok(())
 }
 
-pub async fn emettre_evenement_maj_collection(
+pub async fn emit_rep_update_event(
     mongo: &dyn MongoDao,
     outbound: &MessageOutboundFacade,
     delayed_event_emitter_service: &DelayedEventEmitterService,

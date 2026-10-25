@@ -134,3 +134,9 @@ pub struct TransactionUpdateFileTextContent {
     /// Comment_id allows to replace an existing comment
     pub comment_id: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionDeleteFileComment {
+    pub tuuid: String,
+    pub comment_id: String,
+}

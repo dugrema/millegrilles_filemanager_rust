@@ -14,7 +14,7 @@ use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::{bson, mongodb};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
-use millegrilles_common_rust::mongodb::options::{InsertOneModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use crate::constants::*;
 use crate::external::mongo_struct::{FileComment, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
@@ -75,7 +75,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_DECRIRE_FICHIER => update_file_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_DELETE_FILE_COMMENT => todo!(),
+            TRANSACTION_DELETE_FILE_COMMENT => delete_file_comment(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_FILE_SUMMARY => todo!(),
 
             // Adding, updating internal only (no command)
@@ -688,6 +688,54 @@ async fn update_file_text_content(
             .build()
     );
     models.push(update_model);
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn delete_file_comment(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionDeleteFileComment = wrapper.message.deserialize()?;
+
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(inner) => inner,
+        None => return Err(CommonError::Str("Missing user_id"))
+    };
+
+    let mut models = Vec::with_capacity(2);
+
+    let collection_comments = mongo.get_collection(NOM_COLLECTION_FILE_COMMENTS)?;
+    let filter = doc!{ FIELD_TUUID: &transaction.tuuid, "comment_id": transaction.comment_id };
+
+    models.push(
+        WriteModel::DeleteOne(
+            DeleteOneModel::builder()
+                .namespace(collection_comments.namespace())
+                .filter(filter)
+                .build()
+        )
+    );
+
+    // Update file modification date has hint to change during sync, set index flag to false to re-index the file
+    let filter = doc! { FIELD_TUUID: &transaction.tuuid, FIELD_USER_ID: &user_id};
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let ops = doc! {
+        "$set": {CHAMP_FLAG_INDEX: false},
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        )
+    );
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);
