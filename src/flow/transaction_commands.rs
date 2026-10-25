@@ -57,11 +57,30 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_FILE_SUMMARY => todo!(),
 
                 // Moving files
+                TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
+                TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
+                TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
+                TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
+                TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
+                TRANSACTION_DELETE_V2 => todo!(),
+                TRANSACTION_MOVE_V2 => todo!(),
+                TRANSACTION_COPY_V2 => todo!(),
+                TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
                 // Media
+                TRANSACTION_ASSOCIER_VIDEO => todo!(),
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_VIDEO => todo!(),
+                TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
+                TRANSACTION_VIDEO_SUPPRIMER_JOB_V2 => todo!(),
+                TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
+                TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
 
                 // Sharing
+                TRANSACTION_AJOUTER_CONTACT_LOCAL => todo!(),
+                TRANSACTION_SUPPRIMER_CONTACTS => todo!(),
+                TRANSACTION_PARTAGER_COLLECTIONS => todo!(),
+                TRANSACTION_SUPPRIMER_PARTAGE_USAGER => todo!(),
 
                 _ => {
                     warn!("Unknown action {} for process_transaction, skipping", action);

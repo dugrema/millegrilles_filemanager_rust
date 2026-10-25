@@ -71,14 +71,16 @@ impl TransactionRouter for FileManagerTransactionRouter {
         match action.as_str() {
             // Adding, updating files
             TRANSACTION_NOUVELLE_COLLECTION => new_collection(self.mongo.as_ref(), wrapper, true).await,
-            TRANSACTION_NOUVELLE_COLLECTION_V2 => new_collection(self.mongo.as_ref(), wrapper, false).await,
             TRANSACTION_NOUVELLE_VERSION => new_file_version(self.mongo.as_ref(), wrapper, true).await,
-            TRANSACTION_NOUVELLE_VERSION_V2 => new_file_version(self.mongo.as_ref(), wrapper, false).await,
             TRANSACTION_DECRIRE_FICHIER => update_file_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
             TRANSACTION_DELETE_FILE_COMMENT => todo!(),
             TRANSACTION_FILE_SUMMARY => todo!(),
+
+            // Adding, updating internal only (no command)
+            TRANSACTION_NOUVELLE_COLLECTION_V2 => new_collection(self.mongo.as_ref(), wrapper, false).await,
+            TRANSACTION_NOUVELLE_VERSION_V2 => new_file_version(self.mongo.as_ref(), wrapper, false).await,
 
             // Moving files
             TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
@@ -94,11 +96,24 @@ impl TransactionRouter for FileManagerTransactionRouter {
             // Media
             TRANSACTION_ASSOCIER_VIDEO => todo!(),
             TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_convertions(self.mongo.as_ref(), wrapper, true).await,
+            TRANSACTION_SUPPRIMER_VIDEO => todo!(),
+            TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
+            TRANSACTION_VIDEO_SUPPRIMER_JOB_V2 => todo!(),
+            TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
+            TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
+
+            // Media - internal only (no command)
             TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_convertions(self.mongo.as_ref(), wrapper, false).await,
 
             // Sharing
+            TRANSACTION_AJOUTER_CONTACT_LOCAL => todo!(),
+            TRANSACTION_SUPPRIMER_CONTACTS => todo!(),
+            TRANSACTION_PARTAGER_COLLECTIONS => todo!(),
+            TRANSACTION_SUPPRIMER_PARTAGE_USAGER => todo!(),
 
             // Legacy but still required (no command associated)
+            TRANSACTION_AJOUTER_FICHIERS_COLLECTION => todo!(),
+            TRANSACTION_RECUPERER_DOCUMENTS => todo!(),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
