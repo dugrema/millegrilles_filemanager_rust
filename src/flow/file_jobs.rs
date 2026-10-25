@@ -77,6 +77,8 @@ pub struct BackgroundJob {
     #[serde(default, with="option_chrono_04_datetime")]
     pub date_maj: Option<DateTime<Utc>>,
     pub retry: i32,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub pct_progres: Option<i32>,
 
     // Business key, combined with tuuid to make a unique job value
     pub cle_conversion: Option<String>,
@@ -108,6 +110,7 @@ impl BackgroundJob {
             modified: Utc::now(),
             date_maj: None,
             retry: 0,
+            pct_progres: None,
             cle_conversion: None,
         }
     }
@@ -138,6 +141,7 @@ impl BackgroundJob {
             modified: Utc::now(),
             date_maj: None,
             retry: 0,
+            pct_progres: None,
             cle_conversion: None,
         }
     }

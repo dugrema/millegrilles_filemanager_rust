@@ -15,13 +15,16 @@ use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
+use millegrilles_common_rust::constantes::DELEGATION_GLOBALE_PROPRIETAIRE;
 use millegrilles_common_rust::millegrilles_cryptographie::serde_dates::mapstringepochseconds;
+use millegrilles_common_rust::tokio_stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use crate::constants::{DOMAIN_NAME, ROLE_USAGER};
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{AudioDetail, FileComment, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
 use crate::external::mq::*;
 use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_shared_tuuid, ResultatStatistiquesRow};
+use crate::flow::file_jobs::BackgroundJob;
 use crate::flow::keys::convert_decrypted_key_into_v2;
 use crate::flow::request_models::ResponseFichierRepVersion;
 
@@ -45,6 +48,7 @@ pub async fn process_request<M>(
                 REQUETE_INFO_STATISTIQUES => request_statistics_info(mongo, outbound, wrapper).await,
                 REQUETE_DOCUMENTS_PAR_TUUID => request_documents_by_tuuid(mongo, outbound, wrapper).await,
                 REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
+                REQUETE_JOBS_VIDEO => request_video_conversion_job(mongo, outbound, wrapper).await,
 
                 _ => {
                     warn!("Unknown action {} for process_request, skipping", action);
@@ -368,4 +372,54 @@ async fn request_files_by_tuuid<M>(
     }
 
     outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RequeteJobsVideo {
+    toutes_jobs: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ResponseJobsVideo {
+    jobs: Vec<BackgroundJob>,
+}
+
+async fn request_video_conversion_job<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    info!("Requesting files by tuuid");
+    let request: RequeteJobsVideo = wrapper.message.deserialize()?;
+
+    let mut flag_all_jobs = false;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if wrapper.certificate.verifier_delegation_globale(DELEGATION_GLOBALE_PROPRIETAIRE)? {
+        flag_all_jobs = request.toutes_jobs.unwrap_or(false);
+    } else if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        // Pass
+    } else {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    };
+
+    let filter = match flag_all_jobs {
+        true => doc! {},
+        false => doc! { FIELD_USER_ID: &user_id }
+    };
+
+    let mut jobs = Vec::with_capacity(20);
+
+    let collection = mongo.get_collection_typed::<BackgroundJob>(NOM_COLLECTION_VIDEO_JOBS)?;
+    let mut cursor = collection.find(filter).await?;
+    while let Some(row) = cursor.next().await {
+        jobs.push(row?);
+    }
+
+    outbound.respond(wrapper.delivery_info, ResponseJobsVideo { jobs }).await
 }
