@@ -57,6 +57,7 @@ pub const TRANSACTION_DECRIRE_FICHIER: &str = "decrireFichier";
 pub const TRANSACTION_DECRIRE_COLLECTION: &str = "decrireCollection";
 pub const TRANSACTION_COPIER_FICHIER_TIERS: &str = "copierFichierTiers";
 pub const TRANSACTION_SUPPRIMER_VIDEO: &str = "supprimerVideo";
+pub const TRANSACTION_SUPPRIMER_VIDEO_V2: &str = "supprimerVideoV2";
 pub const TRANSACTION_IMAGE_SUPPRIMER_JOB: &str = "supprimerJobImage";
 pub const TRANSACTION_IMAGE_SUPPRIMER_JOB_V2: &str = "supprimerJobImageV2";
 pub const TRANSACTION_VIDEO_SUPPRIMER_JOB: &str = "supprimerJobVideo";

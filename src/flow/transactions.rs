@@ -96,7 +96,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             // Media
             TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(self.mongo.as_ref(), wrapper, true).await,
-            TRANSACTION_SUPPRIMER_VIDEO => todo!(),
+            TRANSACTION_SUPPRIMER_VIDEO_V2 => delete_video(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
             COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
@@ -116,6 +116,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_RECUPERER_DOCUMENTS => todo!(),
             TRANSACTION_DELETE_V2 => todo!(),
             TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
+            TRANSACTION_SUPPRIMER_VIDEO => todo!(),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
@@ -1040,6 +1041,58 @@ async fn delete_file_reps_v3(
             )
         );
     }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn delete_video(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionSupprimerVideoV2 = wrapper.message.deserialize()?;
+
+    let mut ops_unset_video = doc!{};
+    for label in transaction.labels {
+        ops_unset_video.insert(format!("video.{}", label), true);
+    }
+
+    let mut models = Vec::with_capacity(3);
+
+    // Remove video with matching fuuid
+    let filtre_media = doc!{ CHAMP_FUUID: &transaction.fuuid, FIELD_USER_ID: &transaction.user_id };
+    let ops_media = doc!{ "$unset": ops_unset_video, "$currentDate": { FIELD_DATE_MODIFIED: true } };
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection_media.namespace())
+                .filter(filtre_media)
+                .update(ops_media)
+                .build()
+        )
+    );
+
+    // Cleanup file version (claimed fuuids)
+    let filtre_versions = doc!{ FIELD_FUUID: &transaction.fuuid };
+    let ops = doc! {
+        "$pull": { CHAMP_FUUIDS_RECLAMES: &transaction.fuuid_video },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    let collection_version_fichier = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+
+    debug!("transaction_supprimer_video Supprimer video {:?} ops {:?}", filtre_versions, ops);
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection_version_fichier.namespace())
+                .filter(filtre_versions)
+                .update(ops)
+                .build()
+        )
+    );
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);

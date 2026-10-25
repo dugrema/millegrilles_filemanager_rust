@@ -209,3 +209,16 @@ pub struct TransactionDeleteV3 {
     /// Use that requested the operation
     pub user_id: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionSupprimerVideo {
+    pub fuuid_video: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionSupprimerVideoV2 {
+    pub fuuid_video: String,
+    pub labels: Vec<String>,
+    pub fuuid: String,
+    pub user_id: String,
+}

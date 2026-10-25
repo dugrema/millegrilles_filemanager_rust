@@ -24,7 +24,7 @@ use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAgg
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
 use serde::Serialize;
 use crate::external::mongo::*;
-use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing, set_flag_video_traite};
 use crate::flow::maintenance::verifier_visites_topologies;
 use crate::models::TypeNode;
@@ -69,7 +69,7 @@ pub async fn process_transaction<M,E>(
                 // Media
                 TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_SUPPRIMER_VIDEO => todo!(),
+                TRANSACTION_SUPPRIMER_VIDEO => delete_video(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
                 COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(mongo, outbound, transaction, wrapper).await,
                 TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
@@ -226,7 +226,7 @@ async fn new_file_version<M>(
             return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "File already exists")).await
         }
     }
-    
+
     let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
     let filter = doc!{ FIELD_FUUID: &command.fuuid };
     if collection_versions.find_one(filter).await?.is_some() {
@@ -917,4 +917,93 @@ async fn delete_file_reps<M>(
     }
 
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn delete_video<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionSupprimerVideo = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if !wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    // Check that file exists and the user has access to modify
+    let collection_versions = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let filter_version = doc!{ CHAMP_FUUIDS_RECLAMES: &command.fuuid_video };
+    let version = match collection_versions.find_one(filter_version).await? {
+        Some(version) => version,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let filter_rep = doc!{ FIELD_TUUID: { "$in": &version.tuuids }, FIELD_USER_ID: &user_id };
+    if collection_reps.find_one(filter_rep).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    }
+
+    // Load media information for original fuuid/user_id
+    let filtre_media = doc!{ FIELD_FUUID: &version.fuuid, FIELD_USER_ID: &user_id };
+    let collection_media = mongo.get_collection_typed::<MediaOwnedRow>(NOM_COLLECTION_MEDIA)?;
+    let media_row = match collection_media.find_one(filtre_media.clone()).await {
+        Ok(d) => match d {
+            Some(d) => d,
+            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Video not found")).await
+        },
+        Err(e) => Err(format!("transaction_supprimer_video Erreur chargement info document : {:?}", e))?
+    };
+    
+    let videos = match media_row.video {
+        Some(videos) => videos,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Video not found")).await
+    };
+    let mut labels = Vec::with_capacity(3);
+    for (label, video) in videos {
+        if video.fuuid_video.as_str() == command.fuuid_video.as_str() {
+            labels.push(label.clone());
+        }
+    }
+    
+    if labels.is_empty() {
+        debug!("No matching label found for fuuid_video: {}", command.fuuid_video);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Video not found")).await
+    }
+    
+    // Prepare updated transaction
+    let transaction_value = TransactionSupprimerVideoV2 {
+        fuuid_video: command.fuuid_video.clone(),
+        labels,
+        fuuid: version.fuuid.clone(),
+        user_id: user_id.clone(),
+    };
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_value(
+        DOMAIN_NAME, 
+        TRANSACTION_SUPPRIMER_VIDEO_V2, 
+        serde_json::to_value(transaction_value)?, 
+        None
+    ).await?;
+
+    if let Err(e) = touch_fichiers_rep(mongo, &vec![version.fuuid.as_str()]).await {
+        error!("transaction_favoris_creerpath Erreur touch_fichiers_rep {:?}/{:?} : {:?}", user_id, version.fuuid, e);
+    }
+
+    // Emit update events
+    for tuuid in version.tuuids {
+        if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, tuuid.as_str()).await {
+            warn!("commande_supprimer_video Erreur emettre_evenement_maj_fichier : {:?}", e);
+        }
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
 }
