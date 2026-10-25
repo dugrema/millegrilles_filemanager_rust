@@ -692,3 +692,43 @@ pub async fn remove_lease(
     lease_collection.delete_one(lease_filtre).await?;
     Ok(())
 }
+
+pub async fn set_flag_index_traite(mongo: &dyn MongoDao, tuuid: &str) -> Result<(), CommonError> {
+    // Set flag version reps (si applicable)
+    let filtre = doc! { FIELD_TUUID: tuuid };
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let ops = doc! {
+        "$set": { CHAMP_FLAG_INDEX: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    collection.update_many(filtre, ops).await?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RequestReturnFichiersrepLease {
+    pub tuuid: String,
+    pub user_id: String,
+}
+
+pub async fn return_fichiersrep_lease(
+    mongo: &dyn MongoDao,
+    request: RequestReturnFichiersrepLease,
+    borrower: &str,
+) -> Result<(), CommonError> {
+    // Update flag in fichiersRep
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre = doc!{ "tuuid": &request.tuuid, "user_id": &request.user_id };
+    let ops = doc!{
+        "$set": { borrower: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    collection.update_one(filtre, ops).await?;
+
+    // Remove lease
+    let collection_leases = mongo.get_collection(NOM_COLLECTION_JOBS_LEASES)?;
+    let filtre = doc!{ "tuuid": request.tuuid, "user_id": request.user_id, "borrower": borrower };
+    collection_leases.delete_one(filtre).await?;
+
+    Ok(())
+}

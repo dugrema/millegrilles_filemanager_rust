@@ -14,7 +14,8 @@ use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, Pki
 use serde::Deserialize;
 use crate::external::mongo::*;
 use crate::external::mq::*;
-use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep};
+use crate::flow::file_events::DelayedEventEmitterService;
+use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease};
 use crate::models::TypeNode;
 
 pub async fn process_command<M, E>(
@@ -39,6 +40,8 @@ pub async fn process_command<M, E>(
                 COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_INDEX => command_lease_files_for_indexing(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_SUMMARY => command_lease_files_for_summary(mongo, outbound, wrapper).await,
+                // COMMAND_CONFIRMER_FICHIER_INDEXE => confirm_indexed_file(mongo, outbound, wrapper).await,
+                COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo, outbound, wrapper).await,
 
                 _ => {
                     warn!("Unknown action {} for process_command, skipping", action);
@@ -142,4 +145,29 @@ async fn command_lease_files_for_summary<M>(
             outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await
         }
     }
+}
+
+// #[derive(Deserialize)]
+// struct ParametresConfirmerJobIndexation {
+//     job_id: String,
+//     tuuid: String,
+//     fuuid: Option<String>,
+// }
+
+async fn confirm_indexed_file<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: RequestReturnFichiersrepLease = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_SOLR_RELAI.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    // set_flag_index_traite(mongo, command.tuuid.as_ref()).await?;
+    return_fichiersrep_lease(mongo, command, CHAMP_FLAG_INDEX).await?;
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }

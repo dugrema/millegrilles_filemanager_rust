@@ -5,7 +5,7 @@ use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
 use crate::flow::file_events::{emettre_evenement_maj_collection, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
 use crate::flow::keys::relay_attached_key;
-use crate::flow::transaction_models::{TransactionAssocierConversions, TransactionNouvelleCollection, TransactionNouvelleVersion};
+use crate::flow::transaction_models::*;
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA};
@@ -50,6 +50,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+
                 _ => {
                     warn!("Unknown action {} for process_transaction, skipping", action);
                     Ok(())

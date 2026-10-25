@@ -64,7 +64,7 @@ pub const TRANSACTION_IMAGE_SUPPRIMER_JOB: &str = "supprimerJobImage";
 pub const TRANSACTION_IMAGE_SUPPRIMER_JOB_V2: &str = "supprimerJobImageV2";
 pub const TRANSACTION_VIDEO_SUPPRIMER_JOB: &str = "supprimerJobVideo";
 pub const TRANSACTION_VIDEO_SUPPRIMER_JOB_V2: &str = "supprimerJobVideoV2";
-pub const TRANSACTION_CONFIRMER_FICHIER_INDEXE: &str = "confirmerFichierIndexe";
+pub const COMMAND_CONFIRMER_FICHIER_INDEXE: &str = "confirmerFichierIndexe";
 pub const TRANSACTION_AJOUTER_CONTACT_LOCAL: &str = "ajouterContactLocal";
 pub const TRANSACTION_SUPPRIMER_CONTACTS: &str = "supprimerContacts";
 pub const TRANSACTION_PARTAGER_COLLECTIONS: &str = "partagerCollections";
@@ -226,6 +226,7 @@ pub fn init_queues(mq: &MessagingServiceImpl) -> Result<(), CommonError> {
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_LEASE_FOR_RAG), exchange: Securite::L3Protege },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_CONFIRM_RAG), exchange: Securite::L3Protege },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_LEASE_FOR_SUMMARY), exchange: Securite::L3Protege },
+                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_CONFIRMER_FICHIER_INDEXE), exchange: Securite::L3Protege },
             ],
             ttl: Some(QUEUE_TTL_DEFAULT),
             durable: true,
@@ -264,7 +265,6 @@ pub fn init_queues(mq: &MessagingServiceImpl) -> Result<(), CommonError> {
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_IMAGE_SUPPRIMER_JOB_V2), exchange: Securite::L2Prive },
 
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_VIDEO_SUPPRIMER_JOB_V2), exchange: Securite::L3Protege },
-                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_CONFIRMER_FICHIER_INDEXE), exchange: Securite::L3Protege },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_FILE_SUMMARY), exchange: Securite::L3Protege },
             ],
             ttl: Some(QUEUE_TTL_DEFAULT),
