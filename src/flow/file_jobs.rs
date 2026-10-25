@@ -282,6 +282,7 @@ where T: Into<JobTrigger<'a>> {
     if trigger.filehost_ids.is_empty() {
         let routing = RoutageMessageAction::builder(domain, action, vec![Securite::L2Prive])
             .blocking(false)
+            .correlation_id("DUMMY")  // Required for commands, not generated on non-blocking
             .build();
         if let Err(e) = outbound.send_command(routing, &trigger).await {
             error!("emettre_processing_trigger Erreur emission trigger commande.{}.{} : {:?}", domain, action, e);
@@ -291,6 +292,7 @@ where T: Into<JobTrigger<'a>> {
             let routage = RoutageMessageAction::builder(domain, action, vec![Securite::L2Prive])
                 .partition(filehost_id)
                 .blocking(false)
+                .correlation_id("DUMMY")  // Required for commands, not generated on non-blocking
                 .build();
             if let Err(e) = outbound.send_command(routage, &trigger).await {
                 error!("emettre_processing_trigger Erreur emission trigger commande.{}.{}.{} : {:?}", domain, filehost_id, action, e);
