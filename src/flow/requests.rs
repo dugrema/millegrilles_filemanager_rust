@@ -53,6 +53,23 @@ pub async fn process_request<M>(
                 REQUETE_JOBS_VIDEO => request_video_conversion_job(mongo, outbound, wrapper).await,
                 REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
 
+                REQUETE_GET_CORBEILLE => todo!(),
+                REQUETE_GET_CLES_FICHIERS => todo!(),
+                REQUETE_VERIFIER_ACCES_FUUIDS => todo!(),
+                REQUETE_VERIFIER_ACCES_TUUIDS => todo!(),
+                REQUETE_SYNC_COLLECTION => todo!(),
+                REQUETE_SYNC_CORBEILLE => todo!(),
+                REQUETE_CHARGER_CONTACTS => todo!(),
+                REQUETE_PARTAGES_USAGER => todo!(),
+                REQUETE_PARTAGES_CONTACT => todo!(),
+                REQUETE_STRUCTURE_REPERTOIRE => todo!(),
+                REQUETE_SOUS_REPERTOIRES => todo!(),
+                REQUETE_RECHERCHE_INDEX => todo!(),
+                REQUETE_INFO_VIDEO => todo!(),
+                REQUETE_SEARCH_INDEX_V2 => todo!(),
+
+                REQUETE_ACTIVITE_RECENTE => todo!("Obsolete?"),
+                REQUETE_FAVORIS => todo!("Obsolete?"),
                 _ => {
                     warn!("Unknown action {} for process_request, skipping", action);
                     Ok(())

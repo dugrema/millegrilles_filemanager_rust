@@ -44,12 +44,12 @@ pub async fn process_command<M>(
                 COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo, outbound, wrapper).await,
                 COMMANDE_JOB_GET_KEY => job_get_key(format, messaging, mongo, outbound, wrapper).await,
                 COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo, outbound, wrapper).await,
-                COMMANDE_RECLAMER_FUUIDS => todo!(),
                 COMMANDE_REINDEXER => todo!(),
-                COMMAND_CONFIRM_RAG => todo!(),
+                COMMANDE_RECLAMER_FUUIDS => todo!(),
                 COMMAND_VISITS => todo!(),
                 COMMAND_CLAIM_ALL_FILES => todo!(),
 
+                COMMAND_CONFIRM_RAG => todo!("Obsolete?"),
                 COMMAND_LEASE_FOR_RAG => todo!("Obsolete?"),
                 COMMAND_CONFIRMER_FICHIER_INDEXE => todo!("Obsolete?"),
 
