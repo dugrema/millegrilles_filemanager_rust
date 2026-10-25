@@ -11,6 +11,7 @@ use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
@@ -72,7 +73,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_VIDEO => todo!(),
                 TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
-                TRANSACTION_VIDEO_SUPPRIMER_JOB_V2 => todo!(),
+                COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(mongo, outbound, transaction, wrapper).await,
                 TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
                 TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
 
@@ -635,6 +636,66 @@ async fn associate_video_conversion<M>(
     if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid_video.as_str()]).await {
         warn!("commande_associer_conversions Error claiming new video for file {:?}: {:?}", command.tuuid, e);
     }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn delete_video_job<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionSupprimerJobVideoV2 = wrapper.message.deserialize()?;
+
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    };
+
+    {
+        // Re-emit the command as event to cancel execution
+        let routage = RoutageMessageAction::builder(
+            DOMAIN_NAME, EVENEMENT_ANNULER_JOB_VIDEO, vec![Securite::L3Protege])
+            .build();
+        outbound.emit_event(routage, &command).await?;
+    }
+
+    // Determiner si la job est active et pour le video initial (params.defaults == 'true')
+    let collection = mongo.get_collection_typed::<BackgroundJob>(NOM_COLLECTION_VIDEO_JOBS)?;
+    let filtre = doc!{ "job_id": &command.job_id, FIELD_USER_ID: &user_id };
+    let delivery_info = wrapper.delivery_info.clone();
+    if let Some(job) = collection.find_one(filtre).await? {
+        let initial = match job.params {
+            Some(inner) => inner.defaults.unwrap_or(false),
+            None => false
+        };
+
+        if initial {
+            debug!("commande_supprimer_job_video_v2 Error during initial video processing, abort for good on fuuid {}", command.fuuid);
+            // Convert into transaction, this ensures the initial video creation does not restart on DB restoration
+            transaction.process_transaction(wrapper.into(), None).await?;
+        }
+
+        // Emettre un evenement pour clients
+        if let Some(user_id) = job.user_id.as_ref() {
+            // let evenement = json!({"job_id": &commande.job_id, "fuuid": &commande.fuuid, "tuuid": &commande.tuuid});
+            let routage = RoutageMessageAction::builder(
+                DOMAIN_NAME,
+                "jobSupprimee",
+                vec![Securite::L2Prive]
+            )
+                .partition(user_id)
+                .build();
+            outbound.emit_event(routage, &command).await?;
+        }
+    }
+
+    debug!("Delete video job {}", command.job_id);
+    set_flag_video_traite(mongo, Some(&command.tuuid), &command.fuuid, Some(&command.job_id)).await?;
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
 }

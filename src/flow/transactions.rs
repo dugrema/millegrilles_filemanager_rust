@@ -14,7 +14,7 @@ use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::{bson, mongodb};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
-use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use crate::constants::*;
 use crate::external::mongo_struct::{FileComment, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned, VideoDetail};
@@ -98,7 +98,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_SUPPRIMER_VIDEO => todo!(),
             TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
-            TRANSACTION_VIDEO_SUPPRIMER_JOB_V2 => todo!(),
+            COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
             TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
 
@@ -842,6 +842,38 @@ async fn associate_video_conversion(
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn delete_video_job(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionSupprimerJobVideoV2 = wrapper.message.deserialize()?;
+
+    let filtre_video = doc! { FIELD_FUUID: &transaction.fuuid, FIELD_TUUID: &transaction.tuuid };
+
+    // Set flag versionFichiers
+    let collection = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let ops = doc! {
+        "$set": {
+            CHAMP_FLAG_VIDEO_TRAITE: true,
+            CHAMP_FLAG_MEDIA_TRAITE: true,  // legacy pour eviter de laisser un flag actif pre release-2024.9
+        },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.unordered = Some(vec![
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection.namespace())
+                .filter(filtre_video)
+                .update(ops)
+                .build()
+        )
+    ]);
 
     Ok(aggregator)
 }

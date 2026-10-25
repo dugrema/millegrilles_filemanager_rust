@@ -176,3 +176,10 @@ pub struct TransactionAssocierVideo {
     #[serde(skip_serializing_if="Option::is_none")]
     pub subtitle_stream_idx: Option<u32>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionSupprimerJobVideoV2 {
+    pub tuuid: String,
+    pub fuuid: String,
+    pub job_id: String,
+}
