@@ -434,10 +434,10 @@ async fn associate_file_conversions<M>(
         };
 
         if let Some(audio) = transaction.audio.as_ref() {
-            set_ops.insert("audio", bson::serialize_to_document(audio)?);
+            set_ops.insert("audio", bson::serialize_to_bson(audio)?);
         }
         if let Some(subtitles) = transaction.subtitles.as_ref() {
-            set_ops.insert("subtitles", bson::serialize_to_document(subtitles)?);
+            set_ops.insert("subtitles", bson::serialize_to_bson(subtitles)?);
         }
 
         // Insert into the media table.

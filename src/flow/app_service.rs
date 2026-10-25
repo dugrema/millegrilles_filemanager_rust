@@ -21,7 +21,7 @@ use millegrilles_common_rust::v3::facades::message_inbound::MessageInboundValida
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::impls::backup_restorer::RestorationState;
 use millegrilles_common_rust::v3::impls::messaging_service::MessagingServiceImpl;
-use millegrilles_common_rust::v3::{BackupService, ChiffrageService, ConfigService, MessagingService, PkiService};
+use millegrilles_common_rust::v3::{BackupService, ChiffrageService, ConfigService, FormatService, MessagingService, PkiService};
 use std::sync::Arc;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
 use crate::flow::file_events::DelayedEventEmitterService;
@@ -30,6 +30,7 @@ use crate::flow::file_events::DelayedEventEmitterService;
 pub struct ApplicationService {
     pki: Arc<dyn PkiService>,
     config: Arc<dyn ConfigService>,
+    format: Arc<dyn FormatService>,
     chiffrage: Arc<dyn ChiffrageService>,
     messaging: Arc<dyn MessagingService>,
     outbound: Arc<MessageOutboundFacade>,
@@ -44,6 +45,7 @@ impl ApplicationService {
     pub fn new(
         pki: Arc<dyn PkiService>,
         config: Arc<dyn ConfigService>,
+        format: Arc<dyn FormatService>,
         chiffrage: Arc<dyn ChiffrageService>,
         messaging: Arc<dyn MessagingService>,
         outbound: Arc<MessageOutboundFacade>,
@@ -56,6 +58,7 @@ impl ApplicationService {
         Self {
             pki,
             config,
+            format,
             chiffrage,
             messaging,
             outbound,
@@ -199,9 +202,8 @@ impl ApplicationService {
                 Ok(message) => {
                     let routing = message.message.routage.clone();
                     if let Err(e) = process_command(
-                        self.config.as_ref(),
-                        self.pki.as_ref(),
-                        self.document_encryption.as_ref(),
+                        self.format.as_ref(),
+                        self.messaging.as_ref(),
                         self.mongo.as_ref(),
                         self.outbound.as_ref(),
                         message
