@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
 use crate::external::mq::*;
@@ -27,6 +27,7 @@ use crate::external::mongo::*;
 use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing, set_flag_video_traite};
 use crate::flow::maintenance::verifier_visites_topologies;
+use crate::models::TypeNode;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -59,13 +60,10 @@ pub async fn process_transaction<M,E>(
 
                 // Moving files
                 TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
-                TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
+                TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
                 TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
                 TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
-                TRANSACTION_DELETE_V2 => todo!(),
-                TRANSACTION_MOVE_V2 => todo!(),
-                TRANSACTION_COPY_V2 => todo!(),
                 TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
                 // Media
@@ -698,4 +696,220 @@ async fn delete_video_job<M>(
     set_flag_video_traite(mongo, Some(&command.tuuid), &command.fuuid, Some(&command.job_id)).await?;
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+#[derive(Clone, Deserialize)]
+struct CommandeSupprimerV2 {
+    tuuids: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CommandeSupprimerTuuidsIndex {
+    tuuids: Vec<String>
+}
+
+async fn delete_file_reps<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: CommandeSupprimerV2 = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if !wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    // Separate the directories from the files.
+    let collection_fichierrep = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre = doc!{ 
+        FIELD_TUUID: { "$in": &command.tuuids } 
+    };
+    let mut cursor = collection_fichierrep.find(filtre).await?;
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    let mut tuuids_by_cuuid: HashMap<String, Vec<String>> = HashMap::new();
+    while let Some(row) = cursor.next().await {
+        let row = row?;
+        if row.user_id != user_id.as_str() {
+            warn!("commande_supprimer_documents Deleting file with wrong user_id, SKIPPING");
+            continue
+        }
+        if row.type_node == TypeNode::Fichier.to_str() {
+            files.push(row.tuuid.to_owned());
+        } else {
+            directories.push(row.tuuid.to_owned());
+        }
+
+        // Map all tuuids for post-transaction cleanup (search index, events)
+        let cuuid = match row.path_cuuids.as_ref() {
+            Some(path_cuuids) => match path_cuuids.get(0) {
+                Some(cuuid) => cuuid.as_str(),
+                None => user_id.as_str(),
+            },
+            None => user_id.as_str()
+        };
+        match tuuids_by_cuuid.get_mut(cuuid) {
+            Some(tuuids) => tuuids.push(row.tuuid.to_owned()),
+            None => {
+                tuuids_by_cuuid.insert(cuuid.to_owned(), vec![row.tuuid.to_owned()]);
+            }
+        }
+    }
+
+    // Make a list of all subdirectories to delete.
+    // Only include subdirectories that are not already deleted.
+    let mut subdirectories = Vec::new();
+    let filtre = doc!{
+        FIELD_PATH_CUUIDS: { "$in": &directories },
+        FIELD_NODE_TYPE: TypeNode::Repertoire.to_str(),
+        FIELD_DELETED: false
+    };
+    let mut cursor = collection_fichierrep.find(filtre).await?;
+    while let Some(row) = cursor.next().await {
+        let row = row?;
+        if row.user_id != user_id.as_str() {
+            warn!("commande_supprimer_documents Deleting directory with wrong user_id, SKIPPING");
+            continue
+        }
+        subdirectories.push(row.tuuid.to_owned());
+
+        // Add all directory tuuids for post-transaction cleanup (search index, events)
+        let cuuid = match row.path_cuuids.as_ref() {
+            Some(path_cuuids) => match path_cuuids.get(0) {
+                Some(cuuid) => cuuid.as_str(),
+                None => user_id.as_str(),
+            },
+            None => user_id.as_str()
+        };
+        match tuuids_by_cuuid.get_mut(cuuid) {
+            Some(tuuids) => tuuids.push(row.tuuid.to_owned()),
+            None => {
+                tuuids_by_cuuid.insert(cuuid.to_owned(), vec![row.tuuid.to_owned()]);
+            }
+        }
+    }
+
+    // This command may span multiple transactions depending on the number of rows affected (sub-directories and all files)
+    let mut session = mongo.get_session().await?;
+    session.start_transaction().await?;
+
+    // Make a list of all files that will be affected. 
+    // Those will be sent in (potentially) batched transactions up-front. This removes the
+    // files explicitly from the versions collection.
+    // This is also for post-transaction cleanup (search index, events).
+    let mut subfiles = Vec::with_capacity(5_000);
+    let filtre = doc!{
+        FIELD_PATH_CUUIDS: { "$in": &directories },
+        FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
+        FIELD_DELETED: false
+    };
+    let mut cursor = collection_fichierrep.find(filtre).await?;
+    while let Some(row) = cursor.next().await {
+        let row = row?;
+        if row.user_id != user_id.as_str() {
+            warn!("commande_supprimer_documents Deleting directory with wrong user_id, SKIPPING");
+            continue
+        }
+        subfiles.push(row.tuuid.to_owned());
+        
+        if subfiles.len() == 5_000 {
+            // Submit as a batch
+            let transaction_value = TransactionDeleteV3 {
+                command: None,
+                directories: None,
+                subdirectories: None,
+                subfiles: Some(subfiles),
+                files: None,
+                user_id: Some(user_id.clone()),
+            };
+            subfiles = Vec::with_capacity(5_000);
+            transaction.process_value(
+                DOMAIN_NAME, 
+                TRANSACTION_DELETE_V3, 
+                serde_json::to_value(transaction_value)?, 
+                Some(&mut session)
+            ).await?;
+        }
+        
+        let cuuid = match row.path_cuuids.as_ref() {
+            Some(path_cuuids) => match path_cuuids.get(0) {
+                Some(cuuid) => cuuid.as_str(),
+                None => user_id.as_str(),
+            },
+            None => user_id.as_str()
+        };
+        match tuuids_by_cuuid.get_mut(cuuid) {
+            Some(tuuids) => tuuids.push(row.tuuid.to_owned()),
+            None => {
+                tuuids_by_cuuid.insert(cuuid.to_owned(), vec![row.tuuid.to_owned()]);
+            }
+        }
+    }
+    
+    // Create a new transaction with information to process
+    let transaction_value = TransactionDeleteV3 {
+        command: Some(wrapper.message.clone()),
+        directories: match directories.len() {
+            0 => None,
+            _ => Some(directories)
+        },
+        subdirectories: match subdirectories.len() {
+            0 => None,
+            _ => Some(subdirectories)
+        },
+        subfiles: match subfiles.len() {
+            0 => None,
+            _ => Some(subfiles)
+        },
+        files: match files.len() {
+            0 => None,
+            _ => Some(files)
+        },
+        user_id: Some(user_id.clone()),
+    };
+
+    transaction.process_value(
+        DOMAIN_NAME, 
+        TRANSACTION_DELETE_V3, 
+        serde_json::to_value(transaction_value)?, 
+        Some(&mut session)
+    ).await?;
+
+    // Operations processed, commit session
+    session.commit_transaction().await?;
+    
+    debug!("commande_supprimer_documents Post transaction cleanup for : {:?}", tuuids_by_cuuid);
+
+    // Emettre evenements supprime par cuuid
+    for (cuuid, liste) in tuuids_by_cuuid.into_iter() {
+        let evenement = CollectionEventAggregator::new(cuuid.as_str())
+            .retires(liste.clone());
+        delayed_event_emitter_service.emit(evenement).await?;
+
+        // Cleanup of the search index. The list may be large and take a while to process.
+        // Just let it go after a short wait, not a big deal if it fails. It can be cleaned-up by reindexing the DB.
+        let routing = RoutageMessageAction::builder("solrrelai", "supprimerTuuids", vec![Securite::L3Protege])
+            .timeout_blocking(300)
+            .build();
+        let commande_index = CommandeSupprimerTuuidsIndex { tuuids: liste };
+        match outbound.send_command(routing, &commande_index).await? {
+            Some(response) => match response.is_err()? {
+                (true, e) => {
+                    warn!("Error on command to delete indexing for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
+                },
+                _ => ()
+            },
+            None => warn!("No response on command to delete indexing for deleted tuuid:{:?}", commande_index.tuuids)
+        }
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }

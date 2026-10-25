@@ -3,6 +3,7 @@ use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionformatchiffragestr;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
+use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use serde::{Deserialize, Serialize};
 use crate::external::mongo_struct::{AudioDetail, ImageDetail, SubtitleDetail};
 
@@ -182,4 +183,29 @@ pub struct TransactionSupprimerJobVideoV2 {
     pub tuuid: String,
     pub fuuid: String,
     pub job_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionDeleteV2 {
+    pub command: MessageMilleGrillesOwned,
+    pub directories: Option<Vec<String>>,
+    pub subdirectories: Option<Vec<String>>,
+    pub files: Option<Vec<String>>,
+    pub user_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionDeleteV3 {
+    /// Original user command (copy)
+    pub command: Option<MessageMilleGrillesOwned>,
+    /// Directories directly requested to be deleted
+    pub directories: Option<Vec<String>>,
+    /// Directories under deleted directories (so indirectly)
+    pub subdirectories: Option<Vec<String>>,
+    /// Files under deleted directories (so indirectly)
+    pub subfiles: Option<Vec<String>>,
+    /// Files directly requested to be deleted
+    pub files: Option<Vec<String>>,
+    /// Use that requested the operation
+    pub user_id: Option<String>,
 }
