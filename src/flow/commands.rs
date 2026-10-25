@@ -9,7 +9,7 @@ use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
 use millegrilles_common_rust::serde_json;
-use millegrilles_common_rust::tracing::{info, warn};
+use millegrilles_common_rust::tracing::{error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
@@ -17,9 +17,10 @@ use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, For
 use serde::{Deserialize, Serialize};
 use crate::constants::*;
 use crate::external::mongo::*;
+use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::file_events::DelayedEventEmitterService;
-use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob};
+use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob, BackgroundJobParams, sauvegarder_job_video};
 use crate::models::TypeNode;
 
 pub async fn process_command<M>(
@@ -322,11 +323,99 @@ async fn video_transcoder<M>(
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
     };
 
-    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
-    let filtre_reps = doc!{ FIELD_TUUID: command.tuuid, FIELD_USER_ID: &user_id };
-    if ! collection_reps.find_one(filtre_reps).await?.is_some() {
-        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File already exists")).await
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: false };
+    let file = match collection_reps.find_one(filtre_reps).await? {
+        Some(file) => file,
+        None => {
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+        }
+    };
+
+    let filtre_fichier = doc! { FIELD_FUUID: &command.fuuid };
+    let collection = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let version_courante = match collection.find_one(filtre_fichier).await {
+        Ok(inner) => match inner {
+            Some(inner) => inner,
+            None => {
+                info!("commande_video_convertir find_one : Fichier inconnu {}", command.fuuid);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+            }
+        },
+        Err(e) => {
+            error!("commande_video_convertir find_one : Erreur chargement/conversion {} : {:?}", command.fuuid, e);
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await
+        }
+    };
+
+    // Verifier si le fichier a deja un video correspondant
+    let bitrate_quality = match &command.quality_video {
+        Some(q) => q.to_owned(),
+        None => match &command.bitrate_video {
+            Some(b) => b.to_owned() as i32,
+            None => 0,
+        }
+    };
+    let mut cle_video = format!("{};{};{}p;{}", command.mimetype, command.codec_video, command.resolution_video, bitrate_quality);
+    if let Some(inner) = command.audio_stream_idx.as_ref() {
+        if *inner != 0 {
+            cle_video = format!("{};a{}", cle_video, inner);
+        }
+    }
+    if let Some(inner) = command.subtitle_stream_idx.as_ref() {
+        cle_video = format!("{};s{}", cle_video, inner);
     }
 
-    todo!();
+    // Ensure no video exists with those parameters
+    let filtre_media = doc!{ FIELD_FUUID: &command.fuuid, FIELD_USER_ID: &user_id };
+    let collection_media = mongo.get_collection_typed::<MediaOwnedRow>(NOM_COLLECTION_MEDIA)?;
+    if let Some(media) = collection_media.find_one(filtre_media).await? {
+        if let Some(video) = media.video {
+            if let Some(_) = video.get(cle_video.as_str()) {
+                info!("commande_video_convertir Video file already exists with parameters {} for file {}", cle_video, command.fuuid);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "Converted file already exists")).await
+            }
+        }
+    }
+
+    // Conserver l'information de conversion, emettre nouveau message de job
+    let (cle_id, format, nonce) = match (version_courante.cle_id, version_courante.format, version_courante.nonce) {
+        (Some(cle_id), Some(format), Some(nonce)) => {
+            (cle_id, format, nonce)
+        },
+        _ => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Decryption information missing")).await
+    };
+
+    let mimetype = version_courante.mimetype;
+    let filehost_ids: Vec<&String> = version_courante.visites.keys().collect();
+
+    let mut job = BackgroundJob::new(
+        command.tuuid.as_str(),
+        command.fuuid.as_str(),
+        mimetype.as_str(),
+        &filehost_ids.iter().map(|id| id.as_str()).collect::<Vec<&str>>(),
+        cle_id.as_str(),
+        format.into(),
+        nonce.as_str()
+    );
+    job.user_id = Some(user_id.clone());
+    let params = BackgroundJobParams {
+        defaults: None,
+        thumbnails: None,
+        mimetype: Some(command.mimetype),
+        codec_video: Some(command.codec_video),
+        codec_audio: Some(command.codec_audio),
+        resolution_video: Some(command.resolution_video),
+        quality_video: command.quality_video,
+        bitrate_video: command.bitrate_video,
+        bitrate_audio: Some(command.bitrate_audio),
+        preset: command.preset,
+        audio_stream_idx: command.audio_stream_idx,
+        subtitle_stream_idx: command.subtitle_stream_idx,
+    };
+    job.params = Some(params);
+    sauvegarder_job_video(mongo, outbound, &job).await?;
+
+    let response = CommandeVideoConvertirReponse { ok: true, job_id: Some(job.job_id) };
+    outbound.respond(wrapper.delivery_info, response).await
 }
