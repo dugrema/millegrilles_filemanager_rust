@@ -23,9 +23,11 @@ use crate::constants::{DOMAIN_NAME, ROLE_USAGER};
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{AudioDetail, FileComment, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
 use crate::external::mq::*;
+use crate::flow::access::verifier_acces_usager_media;
 use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_shared_tuuid, ResultatStatistiquesRow};
 use crate::flow::file_jobs::BackgroundJob;
 use crate::flow::keys::convert_decrypted_key_into_v2;
+use crate::flow::media::get_information_fichier_stream;
 use crate::flow::request_models::ResponseFichierRepVersion;
 
 pub async fn process_request<M>(
@@ -49,6 +51,7 @@ pub async fn process_request<M>(
                 REQUETE_DOCUMENTS_PAR_TUUID => request_documents_by_tuuid(mongo, outbound, wrapper).await,
                 REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
                 REQUETE_JOBS_VIDEO => request_video_conversion_job(mongo, outbound, wrapper).await,
+                REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
 
                 _ => {
                     warn!("Unknown action {} for process_request, skipping", action);
@@ -402,7 +405,7 @@ async fn request_video_conversion_job<M>(
     };
     if wrapper.certificate.verifier_delegation_globale(DELEGATION_GLOBALE_PROPRIETAIRE)? {
         flag_all_jobs = request.toutes_jobs.unwrap_or(false);
-    } else if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+    } else if wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
         // Pass
     } else {
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
@@ -422,4 +425,82 @@ async fn request_video_conversion_job<M>(
     }
 
     outbound.respond(wrapper.delivery_info, ResponseJobsVideo { jobs }).await
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RequeteGenererJwtStreaming {
+    fuuid: String,
+    fuuid_ref: Option<String>,
+    contact_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReponseCreerJwtStreaming {
+    ok: bool,
+    err: Option<String>,
+    jwt_token: Option<String>,
+}
+
+async fn create_jwt_streaming<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    info!("Requesting files by tuuid");
+    let request: RequeteGenererJwtStreaming = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+       return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    let user_id = match request.contact_id.as_ref() {
+        Some(contact_id) => {
+            todo!()
+            // // Verifier que le contact_id et les contact_user_id correspondent, extraire user_id partage
+            // let filtre = doc! { CHAMP_CONTACT_ID: &contact_id, CHAMP_CONTACT_USER_ID: user_id };
+            // let collection = mongo.get_collection_typed::<RowPartageContactOwned>(NOM_COLLECTION_PARTAGE_CONTACT)?;
+            // let contact = match collection.find_one(filtre, None).await? {
+            //     Some(inner) => inner,
+            //     None => {
+            //         return Ok(Some(middleware.reponse_err(None, None, Some("contact_id et user_id mismatch ou manquant"))?))
+            //     }
+            // };
+            // // Ok, le contact est valide. Retourner user_id de l'usager qui a fait le partage.
+            // contact.user_id
+        },
+        None => user_id.to_owned()
+    };
+
+    // Verifier si l'usager a acces aux fuuids demandes
+    let mut fuuids = Vec::new();
+    fuuids.push(request.fuuid.as_str());
+    if let Some(fuuid) = request.fuuid_ref.as_ref() {
+        fuuids.push(fuuid.as_str());
+    }
+    let resultat = verifier_acces_usager_media(mongo, &user_id, &fuuids).await?;
+    if resultat.len() != fuuids.len() {
+        warn!("requete_verifier_acces_fuuids Mismatch, l'usager n'a pas acces aux fuuids demandes");
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    // L'acces aux fuuids est OK. Charger l'information de dechiffrage.
+    debug!("requete_verifier_acces_fuuids Charger information de dechiffrage pour {}", request.fuuid);
+    let fuuid_ref = match request.fuuid_ref.as_ref() { Some(inner) => Some(inner.as_str()), None => None };
+    let info_stream = get_information_fichier_stream(mongo, outbound, &user_id, &request.fuuid, fuuid_ref).await?;
+    todo!()
+    // let jwt_token = generer_jwt(mongo, &user_id, &request.fuuid, info_stream.mimetype, info_stream.dechiffrage)?;
+    //
+    // // let reponse = json!({ "fuuids_acces": resultat , "acces_tous": acces_tous, "user_id": user_id });
+    // let reponse = ReponseCreerJwtStreaming {
+    //     ok: true,
+    //     err: None,
+    //     jwt_token: Some(jwt_token)
+    // };
+    // outbound.respond_encrypted(wrapper.delivery_info, reponse, wrapper.certificate.as_ref()).await?;
 }

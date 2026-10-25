@@ -19,6 +19,14 @@ pub fn convert_decrypted_key_into_v2(key: DecryptedKey) -> Result<ResponseReques
     })
 }
 
+pub fn convert_decrypted_key_vec_into_v2(keys: Vec<DecryptedKey>) -> Result<Vec<ResponseRequestDechiffrageV2Cle>, CommonError> {
+    let mut converted_keys = Vec::with_capacity(keys.len());
+    for key in keys {
+        converted_keys.push(convert_decrypted_key_into_v2(key)?);
+    }
+    Ok(converted_keys)
+}
+
 /// Relays the key message to the keymaster. Does not change/sign/verify the message.
 /// Raise error if keymaster reports failure.
 pub async fn relay_attached_key(
