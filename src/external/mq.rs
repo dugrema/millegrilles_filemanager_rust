@@ -54,6 +54,7 @@ pub const TRANSACTION_RECUPERER_DOCUMENTS_V2: &str = "recupererDocumentsV2";
 pub const TRANSACTION_RECYCLE_ITEMS_V3: &str = "recycleItemsV3";
 pub const TRANSACTION_ARCHIVER_DOCUMENTS: &str = "archiverDocuments";
 pub const TRANSACTION_ASSOCIER_CONVERSIONS: &str = "associerConversions";
+pub const TRANSACTION_ASSOCIER_CONVERSIONS_V2: &str = "associerConversionsV2";
 pub const TRANSACTION_ASSOCIER_VIDEO: &str = "associerVideo";
 pub const TRANSACTION_DECRIRE_FICHIER: &str = "decrireFichier";
 pub const TRANSACTION_DECRIRE_COLLECTION: &str = "decrireCollection";

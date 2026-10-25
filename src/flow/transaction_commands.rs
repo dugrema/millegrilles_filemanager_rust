@@ -1,25 +1,30 @@
+use std::collections::HashSet;
 use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::file_events::{emettre_evenement_maj_collection, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService};
+use crate::flow::file_events::{emettre_evenement_maj_collection, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
 use crate::flow::keys::relay_attached_key;
-use crate::flow::transaction_models::{TransactionNouvelleCollection, TransactionNouvelleVersion};
+use crate::flow::transaction_models::{TransactionAssocierConversions, TransactionNouvelleCollection, TransactionNouvelleVersion};
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
+use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
-use millegrilles_common_rust::tracing::{info, warn};
+use millegrilles_common_rust::tokio_stream::StreamExt;
+use millegrilles_common_rust::tracing::{error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
 use serde::Serialize;
 use crate::external::mongo::*;
+use crate::external::mongo_struct::NodeFichierRepOwned;
+use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee};
 use crate::flow::maintenance::verifier_visites_topologies;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
@@ -44,6 +49,7 @@ pub async fn process_transaction<M,E>(
             match action {
                 TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 _ => {
                     warn!("Unknown action {} for process_transaction, skipping", action);
                     Ok(())
@@ -221,6 +227,74 @@ async fn new_file_version<M>(
     // Emit file claim - allows it to be synchronized to all filehosts immediately
     if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid.as_str()]).await {
         warn!("Error claiming new file version {}: {:?}", tuuid, e);
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn associate_file_conversions<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let mut command: TransactionAssocierConversions = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_MEDIA.to_string()])? ||
+        ! wrapper.certificate.verifier_exchanges(vec![Securite::L2Prive])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    };
+
+    // Make a list of affected user_ids. The transaction will be completed with this information.
+    {
+        let filtre_reps = doc! { FIELD_FUUIDS_VERSIONS: &command.fuuid };
+        let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+        let mut user_ids = HashSet::with_capacity(20);
+        let mut cursor = collection_reps.find(filtre_reps).await?;
+        while let Some(row) = cursor.next().await {
+            user_ids.insert(row?.user_id);
+        }
+        if user_ids.is_empty() {
+            return Err(CommonError::String(format!("transaction_associer_conversions No match for fuuid {}", command.fuuid)))
+        }
+        command.user_ids = Some(user_ids.into_iter().collect::<Vec<String>>());
+    }
+
+    // Sign a new transaction that includes the user_ids.
+    transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_ASSOCIER_CONVERSIONS_V2,
+        serde_json::to_value(&command)?,
+        None
+    ).await?;
+
+    if let Err(e) = touch_fichiers_rep(mongo, &vec![command.fuuid.as_str()]).await {
+        error!("commande_associer_conversions Erreur touch_fichiers_rep {} : {:?}", command.fuuid, e);
+    }
+
+    if let Err(e) = set_flag_image_traitee(mongo, command.fuuid.as_str()).await {
+        error!("transaction_associer_conversions Erreur set flag true pour traitement job images {} : {:?}", command.fuuid, e);
+    }
+
+    remove_lease(mongo, command.fuuid.as_str(), CHAMP_FLAG_MEDIA_TRAITE).await?;
+
+    // Emit all tuuids matching this file to ensure listeners get notified
+    emit_update_events_by_fuuids(mongo, delayed_event_emitter_service, &vec![command.fuuid.as_str()]).await?;
+
+    // Emit file claim - allows it to be synchronized to all filehosts immediately
+    let mut image_fuuids = Vec::new();
+    for (_, image) in &command.images {
+        if image.data_chiffre.is_none() {
+            // This is not an inline thumbnail
+            image_fuuids.push(image.hachage.as_str());
+        }
+    }
+
+    if ! image_fuuids.is_empty() {
+        if let Err(e) = verifier_visites_topologies(outbound, &image_fuuids).await {
+            warn!("commande_associer_conversions Error claiming images for file {}: {:?}", command.fuuid, e);
+        }
     }
 
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await

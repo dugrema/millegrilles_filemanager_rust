@@ -69,6 +69,7 @@ async fn filehost_new_fuuid<M>(
     }
 
     let event: FilecontrolerNewFuuidEvent = wrapper.message.deserialize()?;
+    debug!("filehost_new_fuuid {} on {}", event.fuuid, event.filehost_id);
 
     // Expose fields
     let fuuid = event.fuuid.as_str();

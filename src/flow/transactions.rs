@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::external::mongo::*;
 use millegrilles_common_rust::async_trait::async_trait;
 use millegrilles_common_rust::error::Error as CommonError;
@@ -15,11 +15,12 @@ use millegrilles_common_rust::{bson, mongodb};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongodb::options::{InsertOneModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::tokio_stream::StreamExt;
 use crate::constants::DOMAIN_NAME;
-use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion};
+use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion, TransactionAssocierConversions};
 use crate::models::TypeNode;
 
 pub struct FileManagerTransactionService {
@@ -72,6 +73,8 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_NOUVELLE_COLLECTION_V2 => new_collection(self.mongo.as_ref(), wrapper, false).await,
             TRANSACTION_NOUVELLE_VERSION => new_file_version(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_NOUVELLE_VERSION_V2 => new_file_version(self.mongo.as_ref(), wrapper, false).await,
+            TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_convertions(self.mongo.as_ref(), wrapper, true).await,
+            TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_convertions(self.mongo.as_ref(), wrapper, false).await,
 
             _ => Err(CommonError::Str("Unknown transaction action"))
         }
@@ -90,7 +93,9 @@ impl TransactionRouter for FileManagerTransactionRouter {
         // proper batching, all previous transactions must be flush before running the following
         // action types.
         match action {
-            TRANSACTION_NOUVELLE_COLLECTION | TRANSACTION_NOUVELLE_VERSION => true,
+            TRANSACTION_NOUVELLE_COLLECTION
+            | TRANSACTION_NOUVELLE_VERSION
+            | TRANSACTION_ASSOCIER_CONVERSIONS => true,
             _ => false
         }
     }
@@ -296,6 +301,134 @@ async fn new_file_version<M>(
             .build()
     );
     aggregator.unordered = Some(vec![update_model_versions]);
+
+    Ok(aggregator)
+}
+
+async fn associate_file_convertions<M>(
+    mongo: &M,
+    wrapper: TransactionWrapper,
+    legacy_v1: bool,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
+    let transaction: TransactionAssocierConversions = wrapper.message.deserialize()?;
+
+    // Mapper tous les fuuids
+    let fuuids_reclames = {
+        let mut fuuids_reclames = Vec::new();
+        for (_, image) in transaction.images.iter() {
+            if image.data_chiffre.is_none() {  // Ignore content with data: no file to manage
+                fuuids_reclames.push(image.hachage.to_owned());
+            }
+        }
+        fuuids_reclames
+    };
+
+    let user_ids = if legacy_v1 {
+        // Fetch the affected user_ids
+        let filtre_reps = doc! { FIELD_FUUIDS_VERSIONS: &transaction.fuuid };
+        let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+        let mut user_ids = HashSet::with_capacity(20);
+        let mut cursor = collection_reps.find(filtre_reps).await?;
+        while let Some(row) = cursor.next().await {
+            user_ids.insert(row?.user_id);
+        }
+        if user_ids.is_empty() {
+            return Err(CommonError::String(format!("transaction_associer_conversions No match for fuuid {}", transaction.fuuid)))
+        }
+        user_ids.into_iter().collect::<Vec<String>>()
+    } else {
+        // V2: User ids must be provided in the transaction
+        match transaction.user_ids {
+            Some(user_ids) => user_ids,
+            None => return Err(CommonError::Str("User ids not provided"))
+        }
+    };
+
+    let created = &wrapper.message.estampille;
+
+    let mut updates = Vec::with_capacity(20);
+
+    // Insert media
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+    for user_id in user_ids {
+        // Map with the struct (acts as data validation)
+        let media_row = MediaOwnedRow {
+            fuuid: transaction.fuuid.clone(),
+            user_id: user_id.clone(),
+            created: created.clone(),
+            modified: Utc::now(),
+            height: transaction.height,
+            width: transaction.width,
+            duration: transaction.duration,
+            video_codec: transaction.video_codec.clone(),
+            anime: transaction.anime.unwrap_or(false),
+            images: None,
+            video: None,
+            audio: None,
+            subtitles: None,
+            web_subtitles: None,
+        };
+
+        let mut set_ops = doc! {
+            "height": media_row.height,
+            "width": media_row.width,
+            "duration": media_row.duration,
+            "videoCodec": media_row.video_codec,
+            "anime": media_row.anime,
+        };
+
+        if transaction.images.len() > 0 {
+            for (key, value) in &transaction.images {
+                set_ops.insert(format!("images.{}", key), bson::serialize_to_document(value)?);
+            }
+        };
+
+        if let Some(audio) = transaction.audio.as_ref() {
+            set_ops.insert("audio", bson::serialize_to_document(audio)?);
+        }
+        if let Some(subtitles) = transaction.subtitles.as_ref() {
+            set_ops.insert("subtitles", bson::serialize_to_document(subtitles)?);
+        }
+
+        // Insert into the media table.
+        let filtre_media = doc! {"fuuid": media_row.fuuid, "user_id": media_row.user_id};
+        let ops = doc! {
+                "$set": set_ops,
+                "$setOnInsert": { FIELD_DATE_CREATED: Utc::now() },
+                "$currentDate": { FIELD_DATE_MODIFIED: true },
+        };
+
+        let update_model_media = WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .upsert(true)
+                .namespace(collection_media.namespace())
+                .filter(filtre_media)
+                .update(ops)
+                .build()
+        );
+        updates.push(update_model_media);
+    }
+
+    // Update the versions table
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let ops = doc! {
+        "$set": { CHAMP_FLAG_MEDIA_TRAITE: true },
+        "$addToSet": { CHAMP_FUUIDS_RECLAMES: {"$each": &fuuids_reclames} },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let filtre_versions = doc!{ FIELD_FUUID: &transaction.fuuid };
+    let update_model_versions = WriteModel::UpdateOne(
+        UpdateOneModel::builder()
+            .upsert(true)
+            .namespace(collection_versions.namespace())
+            .filter(filtre_versions)
+            .update(ops)
+            .build()
+    );
+    updates.push(update_model_versions);
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(updates);
 
     Ok(aggregator)
 }

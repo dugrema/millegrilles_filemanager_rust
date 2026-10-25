@@ -11,7 +11,7 @@ use millegrilles_common_rust::{bson, serde_json, tokio};
 use millegrilles_common_rust::tokio::select;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
-use millegrilles_common_rust::tracing::{debug, error, info};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use serde::{Deserialize, Serialize};
@@ -263,6 +263,23 @@ impl DelayedEventEmitterService {
     }
 }
 
+pub async fn emit_update_events_by_fuuids<M>(
+    mongo: &M,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    fuuids: &Vec<&str>
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let filtre_reps = doc! {CHAMP_FUUIDS_VERSIONS: { "$in": fuuids }, CHAMP_SUPPRIME: false};
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let mut cursor = collection_reps.find(filtre_reps).await?;
+    while let Some(row) = cursor.next().await {
+        let row = row?;
+        if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, &row.tuuid).await {
+            warn!("commande_associer_conversions Erreur emettre_evenement_maj_fichier tuuid:{}: {:?}", row.tuuid, e);
+        }
+    }
+    Ok(())
+}
+
 pub async fn emettre_evenement_maj_fichier<M>(
     mongo: &M,
     delayed_event_emitter_service: &DelayedEventEmitterService,
@@ -453,6 +470,17 @@ pub async fn declencher_traitement_nouveau_fuuid<M>(
             }
         }
     }
+
+    Ok(())
+}
+
+/// Fait un touch sur les fichiers_rep identifies. User_id optionnel (e.g. pour ops systeme comme visites)
+pub async fn touch_fichiers_rep(mongo: &dyn MongoDao, fuuids: &Vec<&str>) -> Result<(), CommonError> {
+    let filtre = doc! { CHAMP_FUUIDS_VERSIONS: {"$in": fuuids } };
+
+    let ops = doc! { "$currentDate": { FIELD_DATE_MODIFIED: true } };
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    collection.update_many(filtre, ops).await?;
 
     Ok(())
 }

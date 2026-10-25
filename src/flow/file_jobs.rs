@@ -666,3 +666,29 @@ async fn lease_file(
     // Returns true when a lease record is added or updated - this means the lease is successful
     Ok(result.modified_count == 1 || result.upserted_id.is_some())
 }
+
+pub async fn set_flag_image_traitee(
+    mongo: &dyn MongoDao,
+    fuuid: &str
+) -> Result<(), CommonError> {
+    // Set flag versionFichiers
+    let filtre = doc! { FIELD_FUUID: fuuid };
+    let collection = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let ops = doc! {
+        "$set": { CHAMP_FLAG_MEDIA_TRAITE: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    collection.update_many(filtre, ops).await?;
+    Ok(())
+}
+
+pub async fn remove_lease(
+    mongo: &dyn MongoDao,
+    fuuid: &str,
+    borrower: &str,
+) -> Result<(), CommonError> {
+    let lease_collection = mongo.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
+    let lease_filtre = doc!{ CHAMP_FUUID: fuuid, "borrower": borrower };
+    lease_collection.delete_one(lease_filtre).await?;
+    Ok(())
+}

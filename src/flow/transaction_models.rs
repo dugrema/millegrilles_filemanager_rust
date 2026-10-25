@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionformatchiffragestr;
 use serde::{Deserialize, Serialize};
+use crate::external::mongo_struct::{AudioDetail, ImageDetail, SubtitleDetail};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionNouvelleCollection {
@@ -87,4 +89,24 @@ pub fn get_flags_media(mimetype: &str) -> (bool, bool, Option<String>, bool) {
         flag_summary = true;
     }
     (flag_media_traite, flag_video_traite, flag_media, flag_summary)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TransactionAssocierConversions {
+    // pub tuuid: Option<String>,
+    pub fuuid: String,
+    // pub user_id: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub mimetype: Option<String>,
+    pub images: HashMap<String, ImageDetail>,
+    pub anime: Option<bool>,
+    pub duration: Option<f32>,
+    #[serde(rename="videoCodec")]
+    pub video_codec: Option<String>,
+    pub audio: Option<Vec<AudioDetail>>,
+    pub subtitles: Option<Vec<SubtitleDetail>>,
+
+    // Since 2026.7, re-signing on reception linking to user_ids
+    pub user_ids: Option<Vec<String>>,
 }
