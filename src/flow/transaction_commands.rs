@@ -211,21 +211,22 @@ async fn new_file_version<M>(
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
     };
 
+    // Check that the user has access (owns) the collection
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: &command.cuuid, FIELD_USER_ID: &user_id };
+    if collection_reps.find_one(filtre_reps).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Directory not found")).await
+    }
+
     // Verify that this file DOES NOT EXIST (by tuuid/fuuid)
     if let Some(tuuid) = command.tuuid.as_ref() {
-        // Check that the user has access (owns) the collection
-        let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
-        let filtre_reps = doc!{ FIELD_TUUID: tuuid, FIELD_USER_ID: &user_id };
-        if collection_reps.find_one(filtre_reps).await?.is_none() {
-            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
-        }
-
         let collection_files = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
         let filter = doc! { FIELD_TUUID: tuuid };
         if collection_files.find_one(filter).await?.is_some() {
-            return Err(CommonError::Str("File already exists (by tuuid)"))
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "File already exists")).await
         }
     }
+    
     let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
     let filter = doc!{ FIELD_FUUID: &command.fuuid };
     if collection_versions.find_one(filter).await?.is_some() {

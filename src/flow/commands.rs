@@ -14,7 +14,7 @@ use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, FormatService, MessagingService, PkiService};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mq::*;
@@ -40,9 +40,17 @@ pub async fn process_command<M>(
                 COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_INDEX => command_lease_files_for_indexing(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_SUMMARY => command_lease_files_for_summary(mongo, outbound, wrapper).await,
-                COMMAND_CONFIRMER_FICHIER_INDEXE => todo!("Obsolete?"),
                 COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo, outbound, wrapper).await,
                 COMMANDE_JOB_GET_KEY => job_get_key(format, messaging, mongo, outbound, wrapper).await,
+                COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo, outbound, wrapper).await,
+                COMMANDE_RECLAMER_FUUIDS => todo!(),
+                COMMANDE_REINDEXER => todo!(),
+                COMMAND_CONFIRM_RAG => todo!(),
+                COMMAND_VISITS => todo!(),
+                COMMAND_CLAIM_ALL_FILES => todo!(),
+
+                COMMAND_LEASE_FOR_RAG => todo!("Obsolete?"),
+                COMMAND_CONFIRMER_FICHIER_INDEXE => todo!("Obsolete?"),
 
                 _ => {
                     warn!("Unknown action {} for process_command, skipping", action);
@@ -267,4 +275,58 @@ async fn job_get_key<M>(
         },
         None => outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Unknown job")).await
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommandeVideoConvertir {
+    pub tuuid: String,
+    pub fuuid: String,
+    pub mimetype: String,
+    #[serde(rename="codecVideo")]
+    pub codec_video: String,
+    #[serde(rename="codecAudio")]
+    pub codec_audio: String,
+    #[serde(rename="resolutionVideo")]
+    pub resolution_video: u32,
+    #[serde(rename="qualityVideo")]
+    pub quality_video: Option<i32>,
+    #[serde(rename="bitrateVideo")]
+    pub bitrate_video: Option<u32>,
+    #[serde(rename="bitrateAudio")]
+    pub bitrate_audio: u32,
+    pub preset: Option<String>,
+    pub audio_stream_idx: Option<i32>,
+    pub subtitle_stream_idx: Option<i32>,
+}
+
+#[derive(Serialize)]
+struct CommandeVideoConvertirReponse {
+    ok: bool,
+    job_id: Option<String>,
+}
+
+async fn video_transcoder<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: CommandeVideoConvertir = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: command.tuuid, FIELD_USER_ID: &user_id };
+    if ! collection_reps.find_one(filtre_reps).await?.is_some() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File already exists")).await
+    }
+
+    todo!();
 }
