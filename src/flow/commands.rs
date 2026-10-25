@@ -40,7 +40,7 @@ pub async fn process_command<M, E>(
                 COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_INDEX => command_lease_files_for_indexing(mongo, outbound, wrapper).await,
                 COMMAND_LEASE_FOR_SUMMARY => command_lease_files_for_summary(mongo, outbound, wrapper).await,
-                // COMMAND_CONFIRMER_FICHIER_INDEXE => confirm_indexed_file(mongo, outbound, wrapper).await,
+                COMMAND_CONFIRMER_FICHIER_INDEXE => todo!("Obsolete?"),
                 COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo, outbound, wrapper).await,
 
                 _ => {

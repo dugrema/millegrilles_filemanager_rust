@@ -10,3 +10,12 @@ pub const ROLE_USAGER: &str = "usager";
 pub const ROLE_NAVIGATEUR: &str = "navigateur";
 
 pub const COMMAND_CLAIM_FILEHOST_VISITS: &str = "claimAndFilehostVisits";
+
+// Internal transactions, not routable via MQ
+pub const TRANSACTION_NOUVELLE_VERSION_V2: &str = "nouvelleVersionV2";
+pub const TRANSACTION_NOUVELLE_COLLECTION_V2: &str = "nouvelleCollectionV2";
+pub const TRANSACTION_ASSOCIER_CONVERSIONS_V2: &str = "associerConversionsV2";
+pub const TRANSACTION_DELETE_V2: &str = "deleteV2";
+pub const TRANSACTION_MOVE_V2: &str = "moveV2";
+pub const TRANSACTION_COPY_V2: &str = "copyV2";
+pub const TRANSACTION_PERMANENTLY_DELETE_FILES: &str = "permanentlyDeleteFiles";

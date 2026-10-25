@@ -16,11 +16,11 @@ use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongodb::options::{InsertOneModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use crate::constants::DOMAIN_NAME;
+use crate::constants::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion, TransactionAssocierConversions};
+use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion, TransactionAssocierConversions, TransactionDecrireFichier};
 use crate::models::TypeNode;
 
 pub struct FileManagerTransactionService {
@@ -69,12 +69,42 @@ impl TransactionRouter for FileManagerTransactionRouter {
         wrapper: TransactionWrapper
     ) -> Result<TransactionOperationAggregator, CommonError> {
         match action.as_str() {
+            // Adding, updating files
             TRANSACTION_NOUVELLE_COLLECTION => new_collection(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_NOUVELLE_COLLECTION_V2 => new_collection(self.mongo.as_ref(), wrapper, false).await,
             TRANSACTION_NOUVELLE_VERSION => new_file_version(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_NOUVELLE_VERSION_V2 => new_file_version(self.mongo.as_ref(), wrapper, false).await,
+            TRANSACTION_DECRIRE_FICHIER => update_file_metadata(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_DECRIRE_COLLECTION => todo!(),
+            TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
+            TRANSACTION_DELETE_FILE_COMMENT => todo!(),
+            TRANSACTION_FILE_SUMMARY => todo!(),
+
+            // Moving files
+            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
+            TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
+            TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
+            TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
+            TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
+            TRANSACTION_DELETE_V2 => todo!(),
+            TRANSACTION_MOVE_V2 => todo!(),
+            TRANSACTION_COPY_V2 => todo!(),
+            TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
+
+            // Media
+            TRANSACTION_ASSOCIER_VIDEO => todo!(),
             TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_convertions(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_convertions(self.mongo.as_ref(), wrapper, false).await,
+
+            // Sharing
+
+            // Legacy but still required (no command associated)
+
+            // Obsolete transactions - keep to avoid getting an error on rebuild
+            TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
+            TRANSACTION_VIDEO_SUPPRIMER_JOB => obsolete(),
+            TRANSACTION_COPIER_FICHIER_TIERS => obsolete(),
+            TRANSACTION_ARCHIVER_DOCUMENTS => obsolete(),
 
             _ => Err(CommonError::Str("Unknown transaction action"))
         }
@@ -99,6 +129,11 @@ impl TransactionRouter for FileManagerTransactionRouter {
             _ => false
         }
     }
+}
+
+fn obsolete() -> Result<TransactionOperationAggregator, CommonError> {
+    // Obsolete - no effect
+    Ok(TransactionOperationAggregator::new())
 }
 
 async fn new_collection(
@@ -422,6 +457,76 @@ async fn associate_file_convertions<M>(
             .upsert(true)
             .namespace(collection_versions.namespace())
             .filter(filtre_versions)
+            .update(ops)
+            .build()
+    );
+    updates.push(update_model_versions);
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(updates);
+
+    Ok(aggregator)
+}
+
+async fn update_file_metadata(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionDecrireFichier = wrapper.message.deserialize()?;
+
+    let user_id = wrapper.certificate.get_user_id()?;
+
+    let tuuid = transaction.tuuid.as_str();
+    let mut filter_reps = doc! { CHAMP_TUUID: tuuid };
+    if let Some(inner) = &user_id {
+        filter_reps.insert("user_id", inner);
+    }
+
+    let mut set_ops = doc! {
+        CHAMP_FLAG_INDEX: false,
+    };
+
+    let mut updates = Vec::with_capacity(3);
+    
+    // Modifier metadata
+    if let Some(metadata) = transaction.metadata {
+        let metadata_bson = match bson::serialize_to_document(&metadata) {
+            Ok(inner) => inner,
+            Err(e) => Err(format!("transactions.transaction_decire_fichier Erreur conversion metadata vers bson : {:?}", e))?
+        };
+        set_ops.insert(FIELD_METADATA, metadata_bson);
+    }
+
+    if let Some(mimetype) = transaction.mimetype.as_ref() {
+        set_ops.insert(FIELD_MIMETYPE, mimetype);
+
+        // Update versions
+        let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+        let filter = doc!{ FIELD_TUUIDS: tuuid };
+        let ops = doc!{ "$set": { FIELD_MIMETYPE: mimetype }, "$currentDate": { FIELD_DATE_MODIFIED: true } };
+        let update_model_versions = WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .upsert(true)
+                .namespace(collection_versions.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        );
+        updates.push(update_model_versions);
+    }
+
+    // Creer job indexation
+    let ops = doc! {
+        "$set": set_ops,
+        "$unset": { CHAMP_FLAG_INDEX_RETRY: true, CHAMP_FLAG_INDEX_ERREUR: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let update_model_versions = WriteModel::UpdateOne(
+        UpdateOneModel::builder()
+            .upsert(true)
+            .namespace(collection_reps.namespace())
+            .filter(filter_reps)
             .update(ops)
             .build()
     );

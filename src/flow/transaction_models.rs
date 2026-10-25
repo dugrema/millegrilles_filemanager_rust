@@ -110,3 +110,10 @@ pub struct TransactionAssocierConversions {
     // Since 2026.7, re-signing on reception linking to user_ids
     pub user_ids: Option<Vec<String>>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionDecrireFichier {
+    pub tuuid: String,
+    pub metadata: Option<DataChiffre>,
+    pub mimetype: Option<String>,
+}

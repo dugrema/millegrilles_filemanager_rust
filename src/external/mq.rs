@@ -43,9 +43,7 @@ pub const REQUEST_SYNC_DIRECTORY: &str = "syncDirectory";
 pub const REQUEST_FILES_BY_TUUID: &str = "filesByTuuid";
 
 pub const TRANSACTION_NOUVELLE_VERSION: &str = "nouvelleVersion";
-pub const TRANSACTION_NOUVELLE_VERSION_V2: &str = "nouvelleVersionV2";
 pub const TRANSACTION_NOUVELLE_COLLECTION: &str = "nouvelleCollection";
-pub const TRANSACTION_NOUVELLE_COLLECTION_V2: &str = "nouvelleCollectionV2";
 pub const TRANSACTION_AJOUTER_FICHIERS_COLLECTION: &str = "ajouterFichiersCollection";
 pub const TRANSACTION_DEPLACER_FICHIERS_COLLECTION: &str = "deplacerFichiersCollection";
 pub const TRANSACTION_SUPPRIMER_DOCUMENTS: &str = "supprimerDocuments";
@@ -54,7 +52,6 @@ pub const TRANSACTION_RECUPERER_DOCUMENTS_V2: &str = "recupererDocumentsV2";
 pub const TRANSACTION_RECYCLE_ITEMS_V3: &str = "recycleItemsV3";
 pub const TRANSACTION_ARCHIVER_DOCUMENTS: &str = "archiverDocuments";
 pub const TRANSACTION_ASSOCIER_CONVERSIONS: &str = "associerConversions";
-pub const TRANSACTION_ASSOCIER_CONVERSIONS_V2: &str = "associerConversionsV2";
 pub const TRANSACTION_ASSOCIER_VIDEO: &str = "associerVideo";
 pub const TRANSACTION_DECRIRE_FICHIER: &str = "decrireFichier";
 pub const TRANSACTION_DECRIRE_COLLECTION: &str = "decrireCollection";

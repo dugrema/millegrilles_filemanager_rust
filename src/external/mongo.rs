@@ -29,6 +29,7 @@ pub const FIELD_DATE_CREATED: &str = "created";
 pub const FIELD_DATE_MODIFIED: &str = "modified";
 pub const FIELD_FUUID: &str = "fuuid";
 pub const FIELD_TUUID: &str = "tuuid";
+pub const FIELD_TUUIDS: &str = "tuuids";
 pub const FIELD_CUUID: &str = "cuuid";
 pub const FIELD_CUUIDS: &str = "cuuids";
 pub const FIELD_PATH_CUUIDS: &str = "path_cuuids";
@@ -36,6 +37,8 @@ pub const FIELD_PATH_CUUIDS_0: &str = "path_cuuids.0";
 pub const FIELD_NODE_TYPE: &str = "node_type";
 pub const FIELD_FUUIDS_VERSIONS: &str = "fuuids_versions";
 pub const FIELD_FUUIDS_VERSION_0: &str = "fuuids_versions.0";
+pub const FIELD_MIMETYPE: &str = "mimetype";
+pub const FIELD_METADATA: &str = "metadata";
 
 // Old fields
 

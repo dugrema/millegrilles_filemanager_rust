@@ -16,15 +16,15 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{error, info, warn};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
 use serde::Serialize;
 use crate::external::mongo::*;
-use crate::external::mongo_struct::NodeFichierRepOwned;
-use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee};
+use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video};
 use crate::flow::maintenance::verifier_visites_topologies;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
@@ -47,9 +47,21 @@ pub async fn process_transaction<M,E>(
     match wrapper.message.kind {
         MessageKind::Commande => {
             match action {
+                // Adding, updating files
                 TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_DECRIRE_FICHIER => update_file_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_DECRIRE_COLLECTION => todo!(),
+                TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
+                TRANSACTION_DELETE_FILE_COMMENT => todo!(),
+                TRANSACTION_FILE_SUMMARY => todo!(),
+
+                // Moving files
+
+                // Media
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+
+                // Sharing
 
                 _ => {
                     warn!("Unknown action {} for process_transaction, skipping", action);
@@ -299,4 +311,128 @@ async fn associate_file_conversions<M>(
     }
 
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn update_file_metadata<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let mut command: TransactionDecrireFichier = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    // Fetch information for triggers once transaction is complete
+    // Find matching file
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{"tuuid": &command.tuuid, "user_id": &user_id};
+    let file_rep = match collection_reps.find_one(filtre_reps).await? {
+        Some(inner) => inner,
+        None => return Err(CommonError::String(format!("commande_decrire_fichier File not found: tuuid:{}", command.tuuid)))
+    };
+
+    // If this is a file, extract the first fuuid (most recent version)
+    let fuuid = match file_rep.fuuids_versions.as_ref() {
+        Some(inner) => {
+            if let Some(fuuid) = inner.first() {
+                fuuid.to_owned()
+            } else {
+                return Err(CommonError::String(format!("commande_decrire_fichier No file version found for tuuid:{}", command.tuuid)))
+            }
+        },
+        None => return Err(CommonError::String(format!("commande_decrire_fichier No file version found for tuuid:{}", command.tuuid)))
+    };
+
+    let changement_media = match command.mimetype.as_ref() {
+        Some(mimetype) => {
+            debug!("commande_decrire_fichier Verifier si le mimetype du fichier a change (nouveau: {})", mimetype);
+            if file_rep.mimetype != command.mimetype {
+                debug!("commande_decrire_fichier Le mimetype a change de {:?} vers {:?}, reset traitement media de {}",
+                    file_rep.mimetype, command.mimetype, command.tuuid);
+                true
+            } else {
+                false
+            }
+        },
+        None => false
+    };
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    let (_flag_media_traite, flag_video_traite) = if changement_media {
+        if let Some(mimetype) = command.mimetype.as_ref() {
+            // Ajouter flags media au fichier si approprie
+            let (flag_media_traite, flag_video_traite, _, flag_summary) = get_flags_media(
+                mimetype.as_str());
+            let filtre = doc! {CHAMP_FUUID: &fuuid};
+            let ops = doc! {
+                "$set": {
+                    // CHAMP_FLAG_MEDIA: flag_media,
+                    CHAMP_FLAG_MEDIA_TRAITE: flag_media_traite,
+                    CHAMP_FLAG_VIDEO_TRAITE: flag_video_traite,
+                    CHAMP_FLAG_SUMMARY: flag_summary,
+                },
+                "$currentDate": { FIELD_DATE_MODIFIED: true }
+            };
+            debug!("commande_decrire_fichier Reset flags media sur changement mimetype pour {} : {:?}", command.tuuid, ops);
+            let collection = mongo.get_collection_typed::<NodeFichierVersionOwned>(
+                NOM_COLLECTION_VERSIONS)?;
+            collection.update_one(filtre.clone(), ops).await?;
+            (flag_media_traite, flag_video_traite)
+        } else {
+            warn!("commande_decrire_fichier Erreur utilisation fuuid sur changement (None)");
+            (true, true)  // prevent media jobs from being created
+        }
+    } else {
+        (true, true)  // prevent media jobs from being created
+    };
+
+    let tuuid = &command.tuuid;
+
+    // Declencher indexation
+    if ! flag_video_traite {
+        let filtre = doc! {"fuuid": &fuuid};
+        let collection = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+        if let Some(row) = collection.find_one(filtre).await? {
+            if row.cle_id.is_some() && row.format.is_some() && row.nonce.is_some() {
+
+                // Create indexing job
+                let cle_id = row.cle_id.clone().expect("cle_id");
+                let format: &str = row.format.clone().expect("format").into();
+                let nonce = row.nonce.clone().expect("nonce");
+                let mimetype = row.mimetype.clone();
+                let filehost_ids: Vec<&String> = row.visites.keys().collect();
+                let job = BackgroundJob::new_index(
+                    tuuid,
+                    Some(fuuid.as_str()),
+                    &user_id,
+                    mimetype.as_str(),
+                    &filehost_ids.iter().map(|id| id.as_str()).collect::<Vec<&str>>(),
+                    cle_id.as_str(),
+                    format,
+                    nonce.as_str(),
+                );
+
+                // Create video job
+                sauvegarder_job_video(mongo, outbound, &job).await?;
+            }
+        }
+    }
+
+    // Emettre fichier pour que tous les clients recoivent la mise a jour
+    if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, &tuuid).await {
+        warn!("transaction_decire_fichier Erreur emettre_evenement_maj_fichier : {:?}", e);
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
 }
