@@ -6,7 +6,7 @@ use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoImpl, MongoDaoTyped}
 use millegrilles_common_rust::mongodb::ClientSession;
 use millegrilles_common_rust::serde_json::Value;
 use millegrilles_common_rust::v3::impls::transaction_service::TransactionServiceImpl;
-use millegrilles_common_rust::v3::models::{BatchInsertions, ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
+use millegrilles_common_rust::v3::models::*;
 use millegrilles_common_rust::v3::{ConfigService, FormatService, TransactionRouter, TransactionService};
 use std::sync::Arc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
@@ -17,10 +17,10 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongodb::options::{InsertOneModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use crate::constants::*;
-use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mongo_struct::{FileComment, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
-use crate::flow::transaction_models::{get_flags_media, TransactionNouvelleCollection, TransactionNouvelleVersion, TransactionAssocierConversions, TransactionDecrireFichier, TransactionDecrireCollection};
+use crate::flow::transaction_models::*;
 use crate::models::TypeNode;
 
 pub struct FileManagerTransactionService {
@@ -74,7 +74,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_NOUVELLE_VERSION => new_file_version(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_DECRIRE_FICHIER => update_file_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
+            TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DELETE_FILE_COMMENT => todo!(),
             TRANSACTION_FILE_SUMMARY => todo!(),
 
@@ -589,6 +589,108 @@ async fn update_collection_metadata(
     );
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(vec![update_model_versions]);
+
+    Ok(aggregator)
+}
+
+async fn update_file_text_content(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionUpdateFileTextContent = wrapper.message.deserialize()?;
+
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(inner) => inner,
+        None => Err(format!("transaction_update_file_text_content Missing user_id from certificate for id:{}", wrapper.message.id))?
+    };
+
+    let tuuid = transaction.tuuid.as_str();
+    let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
+
+    let collection_comments = mongo.get_collection(NOM_COLLECTION_FILE_COMMENTS)?;
+
+    let mut models = Vec::with_capacity(5);
+
+    if let Some(tags) = &transaction.tags {
+        // Insert tags
+        let filter = doc!{ FIELD_TUUID: &tuuid, "comment_id": CONST_COMMENT_TAGS };
+        let ops = doc!{
+                "$set": {
+                    "date": &created,
+                    "encrypted_data": bson::serialize_to_document(&tags)?,
+                }
+            };
+        let update_model = WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .upsert(true)
+                .namespace(collection_comments.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        );
+        models.push(update_model);
+    }
+
+    if let Some(comment) = transaction.comment {
+        match transaction.comment_id {
+            Some(comment_id) => {
+                // Update
+                let filter = doc!{ FIELD_TUUID: &tuuid, "comment_id": comment_id };
+                let ops = doc!{
+                    "$set": {
+                        "date": &created,
+                        "encrypted_data": bson::serialize_to_document(&comment)?,
+                    }
+                };
+                let update_model = WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .upsert(true)
+                        .namespace(collection_comments.namespace())
+                        .filter(filter)
+                        .update(ops)
+                        .build()
+                );
+                models.push(update_model);
+            }
+            None => {
+                // Insert
+                let comment_entry = FileComment {
+                    tuuid: tuuid.to_string(),
+                    comment_id: wrapper.message.id.clone(),
+                    encrypted_data: comment,
+                    date: wrapper.message.estampille.clone(),
+                    user_id: Some(user_id.clone()),
+                };
+                let insert_model = WriteModel::InsertOne(
+                    InsertOneModel::builder()
+                        .namespace(collection_comments.namespace())
+                        .document(bson::serialize_to_document(&comment_entry)?)
+                        .build()
+                );
+                models.push(insert_model);
+            }
+        }
+    }
+
+    // Update file modification date has hint to change during sync, set index flag to false to re-index the file
+    let filter = doc! {"tuuid": tuuid, "user_id": &user_id};
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let ops = doc! {
+        "$set": { CHAMP_FLAG_INDEX: false },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    let update_model = WriteModel::UpdateOne(
+        UpdateOneModel::builder()
+            .upsert(true)
+            .namespace(collection.namespace())
+            .filter(filter)
+            .update(ops)
+            .build()
+    );
+    models.push(update_model);
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
 
     Ok(aggregator)
 }

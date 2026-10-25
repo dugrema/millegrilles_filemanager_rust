@@ -24,7 +24,7 @@ use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, Mes
 use serde::Serialize;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video};
+use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing};
 use crate::flow::maintenance::verifier_visites_topologies;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
@@ -52,7 +52,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DECRIRE_FICHIER => update_file_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_UPDATE_FILE_TEXT_CONTENT => todo!(),
+                TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DELETE_FILE_COMMENT => todo!(),
                 TRANSACTION_FILE_SUMMARY => todo!(),
 
@@ -133,6 +133,13 @@ async fn new_collection(
     // Add parent collection if required - may fail if parent is unknown
     let path_cuuids: Option<Vec<String>> = match command.cuuid.as_ref() {
         Some(cuuid) => {
+            // Check that the user has access (owns) to parent collection
+            let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+            let filtre_reps = doc!{ FIELD_TUUID: cuuid, FIELD_USER_ID: &user_id };
+            if collection_reps.find_one(filtre_reps).await?.is_none() {
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+            }
+
             // Charger le cuuid pour ajouter path vers root
             match get_path_cuuid(mongo, cuuid).await? {
                 Some(inner) => Some(inner),
@@ -207,6 +214,13 @@ async fn new_file_version<M>(
 
     // Verify that this file DOES NOT EXIST (by tuuid/fuuid)
     if let Some(tuuid) = command.tuuid.as_ref() {
+        // Check that the user has access (owns) the collection
+        let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+        let filtre_reps = doc!{ FIELD_TUUID: tuuid, FIELD_USER_ID: &user_id };
+        if collection_reps.find_one(filtre_reps).await?.is_none() {
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+        }
+
         let collection_files = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
         let filter = doc! { FIELD_TUUID: tuuid };
         if collection_files.find_one(filter).await?.is_some() {
@@ -353,10 +367,10 @@ async fn update_file_metadata<M>(
     // Fetch information for triggers once transaction is complete
     // Find matching file
     let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
-    let filtre_reps = doc!{"tuuid": &command.tuuid, "user_id": &user_id};
+    let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &user_id };
     let file_rep = match collection_reps.find_one(filtre_reps).await? {
         Some(inner) => inner,
-        None => return Err(CommonError::String(format!("commande_decrire_fichier File not found: tuuid:{}", command.tuuid)))
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
     };
 
     // If this is a file, extract the first fuuid (most recent version)
@@ -474,11 +488,58 @@ async fn update_collection_metadata<M>(
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
     };
 
+    // Check that file exists and the user has access to modify
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &user_id };
+    if collection_reps.find_one(filtre_reps).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    }
+
     let delivery_info = wrapper.delivery_info.clone();
     transaction.process_transaction(wrapper.into(), None).await?;
 
     // Emettre fichier pour que tous les clients recoivent la mise a jour
     emettre_evenement_maj_collection(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn update_file_text_content<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionUpdateFileTextContent = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    // Check that file exists and the user has access to modify
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &user_id };
+    if collection_reps.find_one(filtre_reps).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    }
+
+    // Process transaction
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    // Emit file modified event
+    emettre_evenement_maj_collection(mongo, outbound, delayed_event_emitter_service, command.tuuid.as_str(), user_id.as_str()).await?;
+
+    if let Err(e) = trigger_file_indexing(outbound).await {
+        warn!("update_file_text_content Error emitting file indexing trigger: {:?}", e);
+    }
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
 }

@@ -18,6 +18,7 @@ use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chron
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mq::EVENT_FILES_TO_INDEX;
 use crate::flow::keys::convert_decrypted_key_into_v2;
 use crate::flow::request_models::FileCommentResponse;
 
@@ -725,5 +726,15 @@ pub async fn return_fichiersrep_lease(
     let filtre = doc!{ "tuuid": request.tuuid, "user_id": request.user_id, "borrower": borrower };
     collection_leases.delete_one(filtre).await?;
 
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct EventTriggerIndexing {}
+
+pub async fn trigger_file_indexing(outbound: &MessageOutboundFacade) -> Result<(), CommonError> {
+    let routing = RoutageMessageAction::builder(
+        DOMAIN_NAME, EVENT_FILES_TO_INDEX, vec![Securite::L3Protege]).build();
+    outbound.emit_event(routing, EventTriggerIndexing{}).await?;
     Ok(())
 }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionformatchiffragestr;
+use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
 use serde::{Deserialize, Serialize};
 use crate::external::mongo_struct::{AudioDetail, ImageDetail, SubtitleDetail};
 
@@ -122,4 +123,14 @@ pub struct TransactionDecrireFichier {
 pub struct TransactionDecrireCollection {
     pub tuuid: String,
     pub metadata: Option<DataChiffre>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionUpdateFileTextContent {
+    pub tuuid: String,
+    // pub file_language: Option<String>,
+    pub tags: Option<EncryptedDocument>,
+    pub comment: Option<EncryptedDocument>,
+    /// Comment_id allows to replace an existing comment
+    pub comment_id: Option<String>,
 }
