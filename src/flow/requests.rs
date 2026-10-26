@@ -345,7 +345,7 @@ async fn request_files_by_tuuid<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    info!("Requesting files by tuuid");
+    debug!("Requesting files by tuuid");
     let request: RequestFilesByTuuid = wrapper.message.deserialize()?;
 
     // Authorization, includes checking for shared folder access (impersonating other user_id for request)
@@ -410,7 +410,7 @@ async fn request_video_conversion_job<M>(
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
-    info!("Requesting files by tuuid");
+    debug!("request_video_conversion_job");
     let request: RequeteJobsVideo = wrapper.message.deserialize()?;
 
     let mut flag_all_jobs = false;
@@ -464,7 +464,7 @@ async fn create_jwt_streaming<M>(
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
-    info!("Requesting files by tuuid");
+    debug!("create_jwt_streaming");
     let request: RequeteGenererJwtStreaming = wrapper.message.deserialize()?;
 
     // Authorization, includes checking for shared folder access (impersonating other user_id for request)
