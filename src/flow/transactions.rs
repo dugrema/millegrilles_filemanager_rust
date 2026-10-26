@@ -1,28 +1,28 @@
-use std::collections::{HashMap, HashSet};
-use crate::external::mongo::*;
-use millegrilles_common_rust::async_trait::async_trait;
-use millegrilles_common_rust::error::Error as CommonError;
-use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoImpl, MongoDaoTyped};
-use millegrilles_common_rust::mongodb::ClientSession;
-use millegrilles_common_rust::serde_json::Value;
-use millegrilles_common_rust::v3::impls::transaction_service::TransactionServiceImpl;
-use millegrilles_common_rust::v3::models::*;
-use millegrilles_common_rust::v3::{ConfigService, FormatService, TransactionRouter, TransactionService};
-use std::sync::Arc;
-use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::chrono::{DateTime, Utc};
-use millegrilles_common_rust::{bson, mongodb};
-use millegrilles_common_rust::bson::doc;
-use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
-use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
-use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::debug;
 use crate::constants::*;
-use crate::external::mongo_struct::{FileComment, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned, VideoDetail};
+use crate::external::mongo::*;
+use crate::external::mongo_struct::{FileComment, MediaOwnedRow, MediaWebSubtitleDetail, NodeFichierRepOwned, NodeFichierVersionOwned, VideoDetail};
 use crate::external::mq::*;
 use crate::flow::directories::get_path_cuuid;
 use crate::flow::transaction_models::*;
 use crate::models::TypeNode;
+use millegrilles_common_rust::async_trait::async_trait;
+use millegrilles_common_rust::bson::doc;
+use millegrilles_common_rust::certificats::VerificateurPermissions;
+use millegrilles_common_rust::chrono::{DateTime, Utc};
+use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
+use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoImpl, MongoDaoTyped};
+use millegrilles_common_rust::mongodb::ClientSession;
+use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::serde_json::Value;
+use millegrilles_common_rust::tokio_stream::StreamExt;
+use millegrilles_common_rust::tracing::debug;
+use millegrilles_common_rust::v3::impls::transaction_service::TransactionServiceImpl;
+use millegrilles_common_rust::v3::models::*;
+use millegrilles_common_rust::v3::{ConfigService, FormatService, TransactionRouter, TransactionService};
+use millegrilles_common_rust::bson;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub struct FileManagerTransactionService {
     pub transaction: Arc<dyn TransactionService>,
@@ -99,8 +99,8 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_SUPPRIMER_VIDEO_V2 => delete_video(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
             COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
-            TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
+            TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(self.mongo.as_ref(), wrapper).await,
 
             // Media - internal only (no command)
             TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_conversions(self.mongo.as_ref(), wrapper, false).await,
@@ -1250,6 +1250,120 @@ async fn file_summary(
             UpdateOneModel::builder()
                 .namespace(collection_reps.namespace())
                 .filter(filter)
+                .update(ops)
+                .build()
+        )
+    );
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn add_web_subtitle(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionAddWebSubtitle = wrapper.message.deserialize()?;
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return Err(CommonError::Str("User_id missing from certificate"))
+    };
+    let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
+
+    let fuuid = &transaction.file_fuuid.clone();
+    let subtitle_fuuid = &transaction.subtitle_fuuid.clone();
+
+    let mut models = Vec::with_capacity(5);
+
+    // Insert the subtitle_fuuid in version_fuuid to ensure it is claimed
+    let filter_version = doc!{ FIELD_FUUID: &fuuid };
+    let ops = doc!{
+        "$addToSet": { CHAMP_FUUIDS_RECLAMES: &subtitle_fuuid },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_versions.namespace())
+                .filter(filter_version)
+                .update(ops)
+                .build()
+        )
+    );
+
+    let subtitle: MediaWebSubtitleDetail = transaction.into();
+    let subtitle = bson::serialize_to_document(&subtitle)?;
+
+    let filter_media = doc!{CHAMP_FUUID: fuuid, CHAMP_USER_ID: &user_id};
+    let ops = doc!{
+        "$setOnInsert": { FIELD_DATE_CREATED: created },
+        "$push": {"web_subtitles": subtitle},
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_media.namespace())
+                .filter(filter_media)
+                .update(ops)
+                .upsert(true)
+                .build()
+        )
+    );
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn remove_web_subtitle(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionRemoveWebSubtitle = wrapper.message.deserialize()?;
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return Err(CommonError::Str("User_id missing from certificate"))
+    };
+
+    let fuuid = &transaction.file_fuuid.clone();
+    let subtitle_fuuid = &transaction.subtitle_fuuid.clone();
+
+    let mut models = Vec::with_capacity(5);
+
+    let filter_media = doc!{CHAMP_FUUID: fuuid, CHAMP_USER_ID: &user_id};
+    let ops = doc!{
+        "$pull": { "web_subtitles": {"fuuid": subtitle_fuuid} },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_media.namespace())
+                .filter(filter_media)
+                .update(ops)
+                .build()
+        )
+    );
+
+    // Remove the subtitle_fuuid in version_fuuid to ensure it is no longer claimed
+    let filter_version = doc!{CHAMP_FUUID: &fuuid};
+    let ops = doc!{
+        "$pull": { CHAMP_FUUIDS_RECLAMES: &subtitle_fuuid },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_versions.namespace())
+                .filter(filter_version)
                 .update(ops)
                 .build()
         )

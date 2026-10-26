@@ -5,7 +5,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionforma
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use serde::{Deserialize, Serialize};
-use crate::external::mongo_struct::{AudioDetail, ImageDetail, SubtitleDetail};
+use crate::external::mongo_struct::{AudioDetail, ImageDetail, MediaWebSubtitleDetail, SubtitleDetail};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionNouvelleCollection {
@@ -250,4 +250,42 @@ pub struct TransactionFileSummary {
     pub tags: Option<EncryptedDocument>,
     /// The comment contains the summary
     pub comment: Option<EncryptedDocument>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionAddWebSubtitle {
+    pub file_fuuid: String,
+    pub user_id: Option<String>,
+    pub subtitle_fuuid: String,
+    pub language: String,
+    pub index: Option<i32>,
+    pub label: Option<String>,
+    pub cle_id: String,
+    // Encryption parameters
+    pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+}
+
+impl Into<MediaWebSubtitleDetail> for TransactionAddWebSubtitle {
+    fn into(self) -> MediaWebSubtitleDetail {
+        MediaWebSubtitleDetail {
+            language: self.language,
+            fuuid: self.subtitle_fuuid,
+            index: self.index,
+            label: self.label,
+            cle_id: self.cle_id,
+            format: self.format,
+            compression: self.compression,
+            nonce: self.nonce
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionRemoveWebSubtitle {
+    pub file_fuuid: String,
+    pub subtitle_fuuid: String,
 }

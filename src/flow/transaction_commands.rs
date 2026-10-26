@@ -25,6 +25,7 @@ use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, Mes
 use serde::Serialize;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
 use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing, set_flag_video_traite};
 use crate::flow::maintenance::verifier_visites_topologies;
 use crate::models::TypeNode;
@@ -70,8 +71,8 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_SUPPRIMER_VIDEO => delete_video(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
                 COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(mongo, outbound, transaction, wrapper).await,
-                TRANSACTION_ADD_WEB_SUBTITLE => todo!(),
-                TRANSACTION_REMOVE_WEB_SUBTITLE => todo!(),
+                TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
 
                 // Sharing
                 TRANSACTION_AJOUTER_CONTACT_LOCAL => todo!(),
@@ -1162,6 +1163,78 @@ async fn file_summary<M>(
 
     if let Err(e) = trigger_file_indexing(outbound).await {
         warn!("command_file_summary Error emitting file indexing trigger: {:?}", e);
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn add_web_subtitle<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionAddWebSubtitle = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(
+            wrapper.delivery_info,
+            ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())
+        ).await
+    };
+
+    // Find matching file
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_FUUIDS_VERSIONS: &command.file_fuuid, CHAMP_USER_ID: &user_id };
+    let tuuid = match collection_reps.find_one(filtre_reps).await? {
+        Some(row) => row.tuuid,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, tuuid.as_str()).await {
+        warn!("command_add_web_subtitle Erreur emettre_evenement_maj_fichier : {:?}", e);
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn remove_web_subtitle<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionRemoveWebSubtitle = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(
+            wrapper.delivery_info,
+            ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())
+        ).await
+    };
+
+    // Find matching file
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let filtre_reps = doc!{ FIELD_FUUIDS_VERSIONS: &command.file_fuuid, CHAMP_USER_ID: &user_id };
+    let tuuid = match collection_reps.find_one(filtre_reps).await? {
+        Some(row) => row.tuuid,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, tuuid.as_str()).await {
+        warn!("command_add_web_subtitle Erreur emettre_evenement_maj_fichier : {:?}", e);
     }
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await

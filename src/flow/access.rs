@@ -1,11 +1,26 @@
 use std::collections::HashSet;
 use millegrilles_common_rust::bson::doc;
+use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::millegrilles_cryptographie::x509::EnveloppeCertificat;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::debug;
+use millegrilles_common_rust::v3::models::ErrorMessage;
+use crate::constants::ROLE_USAGER;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+
+pub fn verify_user_certificate(certificate: &EnveloppeCertificat) -> Result<String, CommonError> {
+    let user_id = match certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return Err(CommonError::Str("No user id"))
+    };
+    if !certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return Err(CommonError::Str("Not a user certificate"))
+    };
+    Ok(user_id)
+}
 
 pub async fn verifier_acces_usager_media<M>(
     mongo: &M,
@@ -17,7 +32,7 @@ pub async fn verifier_acces_usager_media<M>(
     // Build list of all original fuuids for this user on requested fuuids (may be images or videos).
     let verified_fuuids = {
         let mut original_fuuids = Vec::new();
-        let filtre = doc! {"fuuids_reclames": {"$in": &fuuids}};
+        let filtre = doc! { "fuuids_reclames": { "$in": &fuuids } };
         let collection_versions = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
         let mut cursor = collection_versions.find(filtre).await?;
         while let Some(row) = cursor.next().await {
