@@ -85,13 +85,11 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_NOUVELLE_VERSION_V2 => new_file_version(self.mongo.as_ref(), wrapper, false).await,
 
             // Moving files
-            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
-            TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
             TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
             TRANSACTION_DELETE_V3 => delete_file_reps_v3(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_MOVE_V2 => move_files_collections(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_COPY_V2 => todo!(),
+            TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
             TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
             // Media
@@ -119,6 +117,8 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
             TRANSACTION_SUPPRIMER_VIDEO => todo!(),
             TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
+            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
+            TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),

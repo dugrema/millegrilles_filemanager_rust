@@ -13,7 +13,7 @@ use crate::flow::transactions::FileManagerTransactionService;
 use crate::models::TypeNode;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::constantes::{ROLE_MEDIA, ROLE_OLLAMA_RELAI, RolesCertificats, Securite};
+use millegrilles_common_rust::constantes::{RolesCertificats, Securite, DOMAINE_NOM_MAITREDESCOMPTES, ROLE_MEDIA, ROLE_OLLAMA_RELAI};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
@@ -1533,6 +1533,16 @@ struct CommandeAjouterContactLocalReponse {
     contact_id: String
 }
 
+#[derive(Serialize)]
+struct RequestGetUserInformation {
+    noms_usagers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ReponseChargerUserIdParNomUsager {
+    usagers: Option<HashMap<String, Option<String>>>
+}
+
 async fn share_add_contact<M>(
     mongo: &M,
     outbound: &MessageOutboundFacade,
@@ -1541,7 +1551,91 @@ async fn share_add_contact<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     let command: CommandeAjouterContactLocal = wrapper.message.deserialize()?;
-    todo!()
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    };
+
+    // Identifier le user_id de l'usager a ajouter
+    let user_contact_id = {
+        let routage = RoutageMessageAction::builder(
+            DOMAINE_NOM_MAITREDESCOMPTES,
+            "getUserIdParNomUsager",
+            vec![Securite::L3Protege]
+        )
+            .timeout_blocking(4_000)
+            .build();
+
+        let request = RequestGetUserInformation { noms_usagers: vec![command.nom_usager.clone()] };
+        let response: ReponseChargerUserIdParNomUsager = match outbound.send_request(routage, request).await {
+            Ok(response) => {
+                match response.is_err()? {
+                    (true, err) => {
+                        error!("Error requesting user information: {:?}", err);
+                        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Error requesting user information")).await
+                    },
+                    _ => response.message.deserialize()?
+                }
+            },
+            Err(e) => {
+                error!("Error requesting user informatino: {:?}", e);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Timeout requesting user information")).await
+            }
+        };
+
+        match response.usagers {
+            Some(mut inner) => {
+                match inner.remove(command.nom_usager.as_str()) {
+                    Some(inner) => match inner {
+                        Some(inner) => inner,
+                        None => {
+                            debug!("commande_ajouter_contact_local Erreur chargement user_id pour contact (usager inconnu - 1), SKIP");
+                            // return Ok(Some(middleware.formatter_reponse(&json!({"ok": false, "err": "Erreur chargement user_id pour contact local"}), None)?))
+                            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Error processing user information")).await
+                        }
+                    },
+                    None => {
+                        debug!("commande_ajouter_contact_local Erreur chargement user_id pour contact (usager inconnu - 2), SKIP");
+                        // return Ok(Some(middleware.formatter_reponse(&json!({"ok": false, "err": "Erreur chargement user_id pour contact local"}), None)?))
+                        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Error processing user information")).await
+                    }
+                }
+            },
+            None => {
+                debug!("commande_ajouter_contact_local Erreur chargement user_id pour contact (reponse sans liste usagers), SKIP");
+                // return Ok(Some(middleware.formatter_reponse(&json!({"ok": false, "err": "Erreur chargement user_id pour contact local"}), None)?))
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Error processing user information")).await
+            }
+        }
+    };
+
+    if user_contact_id == user_id {
+        debug!("commande_ajouter_contact_local Usager (courant) tente de s'ajouter a ses propres contacts, SKIP");
+        // return Ok(Some(middleware.formatter_reponse(&json!({"ok": false, "err": "Usager courant ne peut etre ajoute au contacts"}), None)?))
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Not allowed - trying to add same user to contacts")).await
+    }
+
+    // Check if contact already exists
+    let collection = mongo.get_collection(NOM_COLLECTION_PARTAGE_CONTACT)?;
+    let filtre_current = doc!{ FIELD_USER_ID: &user_id, "contact_user_id": &user_contact_id};
+    if collection.find_one(filtre_current).await?.is_some() {
+        debug!("Share already exists for user_id: {}, contact user id: {}", user_id, user_contact_id);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "Share already exists")).await
+    }
+
+    // Convertir en transaction
+    let transaction_value = TransactionAjouterContactLocal { user_id, contact_user_id: user_contact_id };
+    transaction.process_value(DOMAIN_NAME, TRANSACTION_AJOUTER_CONTACT_LOCAL, serde_json::to_value(&transaction_value)?, None).await?;
+
+    // Respond with transaction information
+    let response = CommandeAjouterContactLocalReponse {
+        ok: true,
+        nom_usager: command.nom_usager,
+        user_id: transaction_value.user_id,
+        contact_id: transaction_value.contact_user_id
+    };
+
+    outbound.respond(wrapper.delivery_info, response).await
 }
 
 async fn share_remove_contact<M>(
@@ -1552,6 +1646,11 @@ async fn share_remove_contact<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     let command: TransactionPartagerCollections = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    };
+
     todo!()
 }
 
@@ -1563,6 +1662,11 @@ async fn share_add_collection<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     let command: TransactionSupprimerPartageUsager = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    };
+
     todo!()
 }
 
@@ -1574,5 +1678,11 @@ async fn share_remove_collection<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     let command: TransactionSupprimerJobImageV2 = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    };
+
+
     todo!()
 }
