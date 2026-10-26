@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::chrono::{DateTime, Duration, Utc};
-use millegrilles_common_rust::constantes::Securite;
+use millegrilles_common_rust::constantes::{Securite, DOMAINE_TOPOLOGIE};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
@@ -20,6 +20,7 @@ use crate::external::mongo::*;
 use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::file_jobs::{sauvegarder_job_video, BackgroundJob, BackgroundJobParams};
+use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
 use crate::flow::request_models::ResponseFichierRepVersion;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -483,4 +484,103 @@ pub async fn touch_fichiers_rep(mongo: &dyn MongoDao, fuuids: &Vec<&str>) -> Res
     collection.update_many(filtre, ops).await?;
 
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct FuuidReclamesRow {
+    fuuids_reclames: Vec<String>
+}
+
+const VISIT_BATCH_SIZE: usize = 1000;
+
+/// Claims all required files on filehosts. Prevents them from being deleted.
+pub async fn claim_all_files<M>(mongo: &M, outbound: &MessageOutboundFacade) -> Result<(), CommonError> where M: MongoDaoTyped {
+    info!("claim_all_files Claim fuuids");
+
+    // Faire une reclamation des fichiers regulierement (tous les jours) pour eviter qu'ils soient
+    // consideres comme orphelins (et supprimes).
+    let filtre = doc!{
+        "tuuids.0": {"$exists": true},  // Check if at least one tuuid is linked (means not deleted)
+    };
+
+    let collection_versions = mongo.get_collection_typed::<FuuidReclamesRow>(NOM_COLLECTION_VERSIONS)?;
+    let mut cursor = collection_versions
+        .find(filtre)
+        .projection(doc!{"fuuids_reclames": 1})
+        .await?;
+    let mut visits = Vec::with_capacity(VISIT_BATCH_SIZE);
+    let mut batch_no = 0;
+    while let Some(row) = cursor.next().await {
+        let row = cursor.deserialize_current()?;
+        visits.extend(row.fuuids_reclames);
+
+        if visits.len() >= VISIT_BATCH_SIZE {
+            let mut reponse = claim_files(outbound, batch_no, false, &visits).await?;
+            for _ in 0..3 {
+                if reponse.ok {
+                    break;  // Success
+                }
+                // Wait 5 seconds
+                warn!("claim_all_files Error receiving response for batch of claims, retrying: Error: {:?}", reponse.err);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                reponse = claim_files(outbound, batch_no, false, &visits).await?;
+            }
+
+            if ! reponse.ok {
+                Err(format!("Error claiming files, aborting: {:?}", reponse.err))?;
+            }
+
+            debug!("claim_all_files Batch {} of {} fuuids claimed", batch_no, visits.len());
+            visits.clear();
+            batch_no += 1;
+        }
+    }
+
+    // Last batch
+    let mut reponse = claim_files(outbound, batch_no, true, &visits).await?;
+    for _ in 0..3 {
+        if reponse.ok {
+            break;  // Success
+        }
+        // Wait 5 seconds
+        warn!("claim_all_files Error receiving response for last batch of claims, retrying: Error: {:?}", reponse.err);
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        reponse = claim_files(outbound, batch_no, true, &visits).await?;
+    }
+    if ! reponse.ok {
+        warn!("claim_all_files Error on last batch of claims: {:?}", reponse.err);
+    } else {
+        info!("claim_all_files Done with {} batches completed.", batch_no + 1);
+    }
+
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct RequeteFuuidsVisites<'a> {
+    fuuids: &'a Vec<String>,
+    batch_no: Option<usize>,
+    done: Option<bool>,
+}
+
+async fn claim_files(
+    outbound: &MessageOutboundFacade,
+    batch_no: usize,
+    done: bool,
+    fuuids: &Vec<String>
+) -> Result<RequeteGetVisitesFuuidsResponse, CommonError> {
+    let requete = RequeteFuuidsVisites { fuuids, batch_no: Some(batch_no), done: Some(done) };
+
+    let routage = RoutageMessageAction::builder(
+        DOMAINE_TOPOLOGIE, "claimFiles", vec![Securite::L3Protege]).build();
+
+    let response = match outbound.send_command(routage, requete).await? {
+        Some(response) => response,
+        None => return Err(CommonError::Str("claim_files: No response received"))
+    };
+
+    match response.is_err()? {
+        (true, err) => Err(CommonError::String(format!("claim_files: Error claiming files: {:?}", err))),
+        _ => Ok(response.message.deserialize()?)
+    }
 }

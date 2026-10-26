@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::{Duration, Utc};
@@ -7,8 +8,8 @@ use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
-use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
-use millegrilles_common_rust::serde_json;
+use millegrilles_common_rust::mongo_dao::{MongoDaoImpl, MongoDaoTyped};
+use millegrilles_common_rust::{serde_json, tokio};
 use millegrilles_common_rust::tracing::{error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
@@ -19,17 +20,17 @@ use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
-use crate::flow::file_events::DelayedEventEmitterService;
+use crate::flow::file_events::{claim_all_files, DelayedEventEmitterService};
 use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob, BackgroundJobParams, sauvegarder_job_video, reset_indexation};
 use crate::models::TypeNode;
 
-pub async fn process_command<M>(
+pub async fn process_command(
     format: &dyn FormatService,
     messaging: &dyn MessagingService,
-    mongo: &M,
-    outbound: &MessageOutboundFacade,
+    mongo: Arc<MongoDaoImpl>,
+    outbound: Arc<MessageOutboundFacade>,
     wrapper: MessageValidated,
-) -> Result<(), CommonError> where M: MongoDaoTyped {
+) -> Result<(), CommonError> {
     let action = match wrapper.get_routing_action() {
         Some(action) => action,
         None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err("No action provided in command")).await
@@ -38,16 +39,16 @@ pub async fn process_command<M>(
     match wrapper.message.kind {
         MessageKind::Commande => {
             match action {
-                COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo, outbound, wrapper).await,
-                COMMAND_LEASE_FOR_INDEX => command_lease_files_for_indexing(mongo, outbound, wrapper).await,
-                COMMAND_LEASE_FOR_SUMMARY => command_lease_files_for_summary(mongo, outbound, wrapper).await,
-                COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo, outbound, wrapper).await,
-                COMMANDE_JOB_GET_KEY => job_get_key(format, messaging, mongo, outbound, wrapper).await,
-                COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo, outbound, wrapper).await,
-                COMMANDE_REINDEXER => reindex_files(mongo, outbound, wrapper).await,
+                COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo.as_ref(), outbound.as_ref(), wrapper).await,
+                COMMAND_LEASE_FOR_INDEX => command_lease_files_for_indexing(mongo.as_ref(), outbound.as_ref(), wrapper).await,
+                COMMAND_LEASE_FOR_SUMMARY => command_lease_files_for_summary(mongo.as_ref(), outbound.as_ref(), wrapper).await,
+                COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo.as_ref(), outbound.as_ref(), wrapper).await,
+                COMMANDE_JOB_GET_KEY => job_get_key(format, messaging, mongo.as_ref(), outbound.as_ref(), wrapper).await,
+                COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo.as_ref(), outbound.as_ref(), wrapper).await,
+                COMMANDE_REINDEXER => reindex_files(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMANDE_RECLAMER_FUUIDS => todo!(),
                 COMMAND_VISITS => todo!(),
-                COMMAND_CLAIM_ALL_FILES => todo!(),
+                COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
 
                 COMMAND_CONFIRM_RAG => todo!("Obsolete?"),
                 COMMAND_LEASE_FOR_RAG => todo!("Obsolete?"),
@@ -438,4 +439,33 @@ async fn reindex_files<M>(
         Ok(()) => outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await,
         Err(e) => outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, format!("Error: {:?}", e).as_str())).await,
     }
+}
+
+async fn command_claim_all_files(
+    mongo: Arc<MongoDaoImpl>,
+    outbound: Arc<MessageOutboundFacade>,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> {
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    if wrapper.certificate.get_user_id()?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_delegation_globale(DELEGATION_GLOBALE_PROPRIETAIRE)? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not admin")).await
+    };
+
+    let mongo_clone = mongo.clone();
+    let outbound_clone = outbound.clone();
+    let delivery_info_clone = wrapper.delivery_info.clone();
+
+    // Spawn a new task that will handle the claim for all files
+    tokio::spawn(async move {
+        match claim_all_files(mongo_clone.as_ref(), outbound_clone.as_ref()).await {
+            Ok(()) => outbound_clone.respond(delivery_info_clone, ErrorMessage::ok()).await,
+            Err(e) => outbound_clone.respond(delivery_info_clone, ErrorMessage::err_code(500, format!("Error: {:?}", e).as_str())).await,
+        }
+    });
+
+    // Return OK immediately. Any further feedback will require events.
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }
