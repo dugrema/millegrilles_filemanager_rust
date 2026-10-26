@@ -22,7 +22,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, error, warn};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
@@ -1645,16 +1645,57 @@ async fn share_remove_contact<M>(
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
+    let command: TransactionSupprimerContacts = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    };
+
+    let filter = doc! {
+        CHAMP_USER_ID: &user_id,
+        CHAMP_CONTACT_ID: {"$in": &command.contact_ids},
+    };
+    let collection_contacts = mongo.get_collection(NOM_COLLECTION_PARTAGE_CONTACT)?;
+    let count = collection_contacts.count_documents(filter).await? as usize;
+    if count != command.contact_ids.len() {
+        debug!("User {} requesting removal of contact ids {:?}, mismatch with owned (count: {})", user_id, command.contact_ids, count);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    }
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+async fn share_add_collection<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
     let command: TransactionPartagerCollections = wrapper.message.deserialize()?;
     let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
         Ok(user_id) => user_id,
         Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
     };
 
-    todo!()
+    let filter = doc!{ FIELD_TUUID: { "$in": &command.cuuids }, FIELD_USER_ID: &user_id };
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let count = collection.count_documents(filter).await? as usize;
+    if command.cuuids.len() != count {
+        debug!("User {} requesting shares on {:?}, mismatch with owned (count: {})", user_id, command.cuuids, count);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    }
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
 }
 
-async fn share_add_collection<M>(
+async fn share_remove_collection<M>(
     mongo: &M,
     outbound: &MessageOutboundFacade,
     transaction: &FileManagerTransactionService,
@@ -1667,22 +1708,16 @@ async fn share_add_collection<M>(
         Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
     };
 
-    todo!()
-}
+    let filter = doc!{ FIELD_TUUID: { "$in": &command.tuuid }, FIELD_USER_ID: &user_id };
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let count = collection.count_documents(filter).await? as usize;
+    if count != 1 {
+        debug!("User {} requesting removal of share on {:?} but not owner", user_id, command.tuuid);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    }
 
-async fn share_remove_collection<M>(
-    mongo: &M,
-    outbound: &MessageOutboundFacade,
-    transaction: &FileManagerTransactionService,
-    wrapper: MessageValidated
-) -> Result<(), CommonError> where M: MongoDaoTyped
-{
-    let command: TransactionSupprimerJobImageV2 = wrapper.message.deserialize()?;
-    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
-        Ok(user_id) => user_id,
-        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
-    };
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
 
-
-    todo!()
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
 }
