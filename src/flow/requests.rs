@@ -257,7 +257,7 @@ async fn request_statistics_info<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    info!("Requesting sync directory");
+    debug!("request_statistics_info");
 
     todo!();
 
@@ -281,7 +281,7 @@ async fn request_documents_by_tuuid<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    info!("Requesting documents by tuuid");
+    debug!("Requesting documents by tuuid");
 
     todo!();
 

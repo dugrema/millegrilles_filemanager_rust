@@ -59,6 +59,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_FILE_SUMMARY => todo!(),
 
                 // Moving files
+                TRANSACTION_AJOUTER_FICHIERS_COLLECTION => copy_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DEPLACER_FICHIERS_COLLECTION => move_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
@@ -1103,4 +1104,26 @@ async fn move_files_collections<M>(
     }
 
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionAjouterFichiersCollection {
+    pub cuuid: String,                  // Collection qui recoit les documents
+    pub inclure_tuuids: Vec<String>,    // Fichiers/rep a ajouter a la collection
+    pub contact_id: Option<String>,     // Permission de copie a partir d'un partage
+    pub include_deleted: Option<bool>,  // Allows copying from trash to new section
+}
+
+async fn copy_files_collections<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionAjouterFichiersCollection = wrapper.message.deserialize()?;
+
+    todo!()
 }
