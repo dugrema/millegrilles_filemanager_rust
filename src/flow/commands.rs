@@ -20,8 +20,9 @@ use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
-use crate::flow::file_events::{claim_all_files, DelayedEventEmitterService};
+use crate::flow::file_events::{claim_all_files, DelayedEventEmitterService, receive_visits};
 use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob, BackgroundJobParams, sauvegarder_job_video, reset_indexation};
+use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
 use crate::models::TypeNode;
 
 pub async fn process_command(
@@ -47,7 +48,7 @@ pub async fn process_command(
                 COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMANDE_REINDEXER => reindex_files(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMANDE_RECLAMER_FUUIDS => todo!(),
-                COMMAND_VISITS => todo!(),
+                COMMAND_VISITS => command_visits(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
 
                 COMMAND_CONFIRM_RAG => todo!("Obsolete?"),
@@ -468,4 +469,26 @@ async fn command_claim_all_files(
 
     // Return OK immediately. Any further feedback will require events.
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn command_visits<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: RequeteGetVisitesFuuidsResponse = wrapper.message.deserialize()?;
+
+    // Authorization
+    if ! wrapper.certificate.verifier_domaines(vec![DOMAINE_TOPOLOGIE.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    };
+
+    match receive_visits(mongo, command).await {
+        Ok(()) => outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await,
+        Err(e) => {
+            error!("Error processing command visits: {:?}", e);
+            outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await
+        },
+    }
 }

@@ -14,6 +14,7 @@ use millegrilles_common_rust::tokio_util::sync::CancellationToken;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
+use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
 use serde::{Deserialize, Serialize};
 use crate::constants::*;
 use crate::external::mongo::*;
@@ -583,4 +584,44 @@ async fn claim_files(
         (true, err) => Err(CommonError::String(format!("claim_files: Error claiming files: {:?}", err))),
         _ => Ok(response.message.deserialize()?)
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VisitWorkRow {
+    pub fuuid: String,
+    pub filehost_id: Option<String>,
+    #[serde(with="option_chrono_04_datetime")]
+    pub visit_time: Option<DateTime<Utc>>,
+}
+
+pub async fn receive_visits(mongo: &dyn MongoDao, command: RequeteGetVisitesFuuidsResponse) -> Result<(), CommonError> {
+    let collection = mongo.get_collection(NOM_COLLECTION_TEMP_VISITS)?;
+    if let Some(visits) = command.visits {
+        debug!("Received {} visit entries", visits.len());
+        let mut batch = Vec::with_capacity(visits.len());
+        for visit in visits {
+            for (filehost_id, timestamp) in visit.visits {
+                let visit_date = DateTime::from_timestamp(timestamp, 0).expect("visit_date from_timestamp");
+                let row = VisitWorkRow { fuuid: visit.fuuid.clone(), filehost_id: Some(filehost_id), visit_time: Some(visit_date) };
+                batch.push(bson::serialize_to_document(&row)?);
+            }
+        }
+        if ! batch.is_empty() {
+            collection.insert_many(batch).await?;
+        }
+    }
+
+    if let Some(unknowns) = command.unknown {
+        debug!("Received {} unknwown fuuid claims responses", unknowns.len());
+        let mut batch = Vec::with_capacity(unknowns.len());
+        for fuuid in unknowns {
+            let row = VisitWorkRow { fuuid, filehost_id: None, visit_time: None };
+            batch.push(bson::serialize_to_document(&row)?);
+        }
+        if ! batch.is_empty() {
+            collection.insert_many(batch).await?;
+        }
+    }
+
+    Ok(())
 }
