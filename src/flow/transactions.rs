@@ -89,7 +89,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
             TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
             TRANSACTION_DELETE_V3 => delete_file_reps_v3(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_MOVE_V2 => todo!(),
+            TRANSACTION_MOVE_V2 => move_files_collections(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_COPY_V2 => todo!(),
             TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
@@ -1093,6 +1093,92 @@ async fn delete_video(
                 .build()
         )
     );
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn move_files_collections(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionMoveV2 = wrapper.message.deserialize()?;
+
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+
+    let capacity = match transaction.directories.as_ref() {
+        Some(inner) => inner.len() + 2,
+        None => 2
+    };
+    let mut models = Vec::with_capacity(capacity);
+
+    if let Some(files) = transaction.files {
+        let filtre = doc!{
+            FIELD_TUUID: { "$in": files },
+            FIELD_NODE_TYPE: TypeNode::Fichier.to_str()
+        };
+        let ops = doc! {
+            "$set": { FIELD_PATH_CUUIDS: &transaction.destination, CHAMP_FLAG_INDEX: false },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_reps.namespace())
+                    .filter(filtre)
+                    .update(ops)
+                    .build()
+            )
+        );
+    }
+
+    if let Some(directories) = transaction.directories {
+        for move_command in directories {
+            // Move everything directly under the directories (including deleted files/subdirectory)
+            for directory in move_command.directories {
+                // Move the directory itself
+                let filtre = doc! { FIELD_TUUID: &directory };
+                // Change type_node to Repertoire if it is Collection. It is possible to move a top-level Collection under another.
+                let ops = doc! {
+                    "$set": {
+                        FIELD_PATH_CUUIDS: &move_command.path,
+                        FIELD_NODE_TYPE: TypeNode::Repertoire.to_str(),
+                        CHAMP_FLAG_INDEX: false
+                    },
+                    "$currentDate": { FIELD_DATE_MODIFIED: true }
+                };
+                models.push(
+                    WriteModel::UpdateOne(
+                        UpdateOneModel::builder()
+                            .namespace(collection_reps.namespace())
+                            .filter(filtre)
+                            .update(ops)
+                            .build()
+                    )
+                );
+
+                // Move files under directory
+                let mut new_path = vec![&directory];
+                new_path.extend(&move_command.path);
+                let filtre = doc! { "path_cuuids.0": &directory, FIELD_NODE_TYPE: TypeNode::Fichier.to_str() };
+                let ops = doc! {
+                    "$set": { FIELD_PATH_CUUIDS: new_path, CHAMP_FLAG_INDEX: false },
+                    "$currentDate": { FIELD_DATE_MODIFIED: true }
+                };
+                models.push(
+                    WriteModel::UpdateMany(
+                        UpdateManyModel::builder()
+                            .namespace(collection_reps.namespace())
+                            .filter(filtre)
+                            .update(ops)
+                            .build()
+                    )
+                );
+            }
+        }
+    }
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);

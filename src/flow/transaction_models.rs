@@ -222,3 +222,20 @@ pub struct TransactionSupprimerVideoV2 {
     pub fuuid: String,
     pub user_id: String,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionMoveV2Directory {
+    /// Reverse hierarchy of destination (cuuids)
+    pub path: Vec<String>,
+    /// List of individual cuuids to move
+    pub directories: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionMoveV2 {
+    pub command: MessageMilleGrillesOwned,
+    pub destination: Vec<String>,
+    pub directories: Option<Vec<TransactionMoveV2Directory>>,
+    pub files: Option<Vec<String>>,
+    pub user_id: Option<String>,
+}

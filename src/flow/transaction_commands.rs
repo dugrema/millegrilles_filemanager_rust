@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
 use crate::external::mq::*;
-use crate::flow::directories::get_path_cuuid;
+use crate::flow::directories::{get_path_cuuid, parse_selection_directories};
 use crate::flow::file_events::{emit_rep_update_event, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
 use crate::flow::keys::relay_attached_key;
 use crate::flow::transaction_models::*;
@@ -59,12 +59,9 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_FILE_SUMMARY => todo!(),
 
                 // Moving files
-                TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
+                TRANSACTION_DEPLACER_FICHIERS_COLLECTION => move_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
                 TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
-                TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
-                TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
                 // Media
                 TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
@@ -80,6 +77,9 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_SUPPRIMER_CONTACTS => todo!(),
                 TRANSACTION_PARTAGER_COLLECTIONS => todo!(),
                 TRANSACTION_SUPPRIMER_PARTAGE_USAGER => todo!(),
+
+                // Obsolete?
+                TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("Obsolete?"),
 
                 _ => {
                     warn!("Unknown action {} for process_transaction, skipping", action);
@@ -1006,4 +1006,101 @@ async fn delete_video<M>(
     }
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionDeplacerFichiersCollection {
+    pub cuuid_origine: String,          // Collection avec les documents (source)
+    pub cuuid_destination: String,      // Collection qui recoit les documents
+    pub inclure_tuuids: Vec<String>,    // Fichiers/rep a ajouter a la collection
+}
+
+async fn move_files_collections<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionDeplacerFichiersCollection = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if !wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
+    };
+
+    let mut session = mongo.get_session().await?;
+    session.start_transaction().await?;
+
+    let result = parse_selection_directories(
+        mongo,
+        user_id.as_str(),
+        &command.cuuid_destination,
+        &command.inclure_tuuids,
+        true,
+        true,
+        &mut session
+    ).await?;
+
+    // Check that the destination is not under the source (moving under itself breaks the graph)
+    if let Some(directory_moves) = result.directories.as_ref() {
+        for directory_move in directory_moves {
+            for directory in &directory_move.directories {
+                if result.destination_path.contains(directory) {
+                    debug!("commande_deplacer_fichiers_collection Rejecting move directory, the destination is under the source (this breaks the graph)");
+                    return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "Cannot move directory under itself")).await
+                }
+            }
+        }
+    }
+
+    // Build the transaction, remove certificate
+    let mut original_command = wrapper.message.clone();
+    original_command.certificat = None;
+
+    let transaction_value = TransactionMoveV2 {
+        command: original_command,
+        destination: result.destination_path,
+        directories: result.directories,
+        files: result.files,
+        user_id: Some(user_id),
+    };
+
+    debug!("commande_deplacer_fichiers_collection Transaction\n{}", serde_json::to_string(&transaction_value)?);
+
+    transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_MOVE_V2,
+        serde_json::to_value(transaction_value)?,
+        Some(&mut session)
+    ).await?;
+
+    // Job done, commit then emit events (they are transaction agnostic)
+    session.commit_transaction().await?;
+
+    for tuuid in &command.inclure_tuuids {
+        // Emettre fichier pour que tous les clients recoivent la mise a jour
+        if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, &tuuid).await {
+            warn!("transaction_deplacer_fichiers_collection Erreur emettre_evenement_maj_fichier : {:?}", e);
+        }
+    }
+
+    let destination_events = CollectionEventAggregator::new(command.cuuid_destination.as_str())
+        .fichiers_ajoutes(command.inclure_tuuids.clone());
+    let source_events = CollectionEventAggregator::new(command.cuuid_origine.as_str())
+        .retires(command.inclure_tuuids.clone());
+
+    if let Err(e) = delayed_event_emitter_service.emit(source_events).await {
+        warn!("move_files_collections Error delayed_event_emitter_service (source events) : {:?}", e);
+    }
+    if let Err(e) = delayed_event_emitter_service.emit(destination_events).await {
+        warn!("move_files_collections Error delayed_event_emitter_service (destination events) : {:?}", e);
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }

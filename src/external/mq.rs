@@ -67,7 +67,6 @@ pub const TRANSACTION_AJOUTER_CONTACT_LOCAL: &str = "ajouterContactLocal";
 pub const TRANSACTION_SUPPRIMER_CONTACTS: &str = "supprimerContacts";
 pub const TRANSACTION_PARTAGER_COLLECTIONS: &str = "partagerCollections";
 pub const TRANSACTION_SUPPRIMER_PARTAGE_USAGER: &str = "supprimerPartageUsager";
-pub const TRANSACTION_SUPPRIMER_ORPHELINS: &str = "supprimerOrphelins";
 pub const TRANSACTION_UPDATE_FILE_TEXT_CONTENT: &str = "updateFileTextContent";
 pub const TRANSACTION_DELETE_FILE_COMMENT: &str = "deleteFileComment";
 // pub const TRANSACTION_DELETE_V2: &str = "deleteV2";
