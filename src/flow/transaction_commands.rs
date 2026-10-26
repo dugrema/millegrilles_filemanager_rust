@@ -8,7 +8,7 @@ use crate::flow::keys::relay_attached_key;
 use crate::flow::transaction_models::*;
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA};
+use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA, ROLE_OLLAMA_RELAI};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
@@ -56,7 +56,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DELETE_FILE_COMMENT => delete_file_comment(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_FILE_SUMMARY => todo!(),
+                TRANSACTION_FILE_SUMMARY => file_summary(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
 
                 // Moving files
                 TRANSACTION_AJOUTER_FICHIERS_COLLECTION => copy_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
@@ -1126,4 +1126,43 @@ async fn copy_files_collections<M>(
     let command: TransactionAjouterFichiersCollection = wrapper.message.deserialize()?;
 
     todo!()
+}
+
+async fn file_summary<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionFileSummary = wrapper.message.deserialize()?;
+
+    let tuuid = command.tuuid.as_str();
+
+    // Authorization : Must be in the list of roles
+    match wrapper.certificate.verifier_roles_string(vec![ROLE_OLLAMA_RELAI.to_string()])? &&
+        wrapper.certificate.verifier_exchanges(vec![Securite::L3Protege])?
+    {
+        true => (),
+        false => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await,
+    };
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    let lease_collection = mongo.get_collection(NOM_COLLECTION_JOBS_LEASES)?;
+    let lease_filtre = doc!{ FIELD_TUUID: tuuid, "borrower": CHAMP_FLAG_SUMMARY };
+    lease_collection.delete_one(lease_filtre).await?;
+
+    // Emit all tuuids matching this file to ensure listeners get notified
+    if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, tuuid).await {
+        warn!("command_file_summary Erreur emettre_evenement_maj_fichier {}: {:?}", tuuid, e);
+    }
+
+    if let Err(e) = trigger_file_indexing(outbound).await {
+        warn!("command_file_summary Error emitting file indexing trigger: {:?}", e);
+    }
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
 }

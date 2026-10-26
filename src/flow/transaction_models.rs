@@ -239,3 +239,15 @@ pub struct TransactionMoveV2 {
     pub files: Option<Vec<String>>,
     pub user_id: Option<String>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionFileSummary {
+    pub fuuid: String,
+    pub tuuid: String,
+    /// Detected file language
+    pub file_language: Option<String>,
+    /// Generated tags
+    pub tags: Option<EncryptedDocument>,
+    /// The comment contains the summary
+    pub comment: Option<EncryptedDocument>,
+}

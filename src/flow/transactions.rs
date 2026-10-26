@@ -77,7 +77,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DELETE_FILE_COMMENT => delete_file_comment(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_FILE_SUMMARY => todo!(),
+            TRANSACTION_FILE_SUMMARY => file_summary(self.mongo.as_ref(), wrapper).await,
 
             // Adding, updating internal only (no command)
             TRANSACTION_NOUVELLE_COLLECTION_V2 => new_collection(self.mongo.as_ref(), wrapper, false).await,
@@ -1179,6 +1179,81 @@ async fn move_files_collections(
             }
         }
     }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn file_summary(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionFileSummary = wrapper.message.deserialize()?;
+
+    let mut models = Vec::with_capacity(5);
+
+    let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
+
+    if let Some(comment) = transaction.comment {
+        let collection_comments = mongo.get_collection(NOM_COLLECTION_FILE_COMMENTS)?;
+        // Insert
+        let comment_entry = FileComment {
+            tuuid: transaction.tuuid.clone(),
+            comment_id: wrapper.message.id.clone(),
+            encrypted_data: comment.clone(),
+            date: wrapper.message.estampille.clone(),
+            user_id: None,
+        };
+        models.push(
+            WriteModel::InsertOne(
+                InsertOneModel::builder()
+                    .namespace(collection_comments.namespace())
+                    .document(bson::serialize_to_document(&comment_entry)?)
+                    .build()
+            )
+        );
+
+        // Insert tags when appropriate
+        if let Some(tags) = &transaction.tags {
+            let filter = doc!{ FIELD_TUUID: &transaction.tuuid, "comment_id": CONST_COMMENT_TAGS };
+            let ops = doc!{
+                "$set": {
+                    "date": &created,
+                    "encrypted_data": bson::serialize_to_document(&tags)?,
+                }
+            };
+            models.push(
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(collection_comments.namespace())
+                        .filter(filter)
+                        .update(ops)
+                        .upsert(true)
+                        .build()
+                )
+            );
+
+        }
+    }
+
+    // Set summary flag to true, reset index flag for reindexing with updated content.
+    let filter = doc!{ FIELD_TUUID: &transaction.tuuid };
+    let ops = doc!{
+        "$set": { CHAMP_FLAG_SUMMARY: true, CHAMP_FLAG_INDEX: false },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_reps.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        )
+    );
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);
