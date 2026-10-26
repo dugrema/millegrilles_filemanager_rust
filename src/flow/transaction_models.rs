@@ -306,3 +306,8 @@ pub struct TransactionRecycleItemsV4 {
     /// Directories to restore.
     pub directory_tuuids: Vec<String>
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionSupprimerJobImageV2 {
+    pub fuuid: String
+}

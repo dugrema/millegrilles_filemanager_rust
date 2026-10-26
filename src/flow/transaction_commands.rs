@@ -8,7 +8,7 @@ use crate::flow::keys::relay_attached_key;
 use crate::flow::transaction_models::*;
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA, ROLE_OLLAMA_RELAI};
+use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA, ROLE_OLLAMA_RELAI, RolesCertificats};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
@@ -69,7 +69,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_VIDEO => delete_video(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
+                TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => delete_image_job(mongo, outbound, transaction, wrapper).await,
                 COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(mongo, outbound, transaction, wrapper).await,
                 TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
@@ -1492,4 +1492,30 @@ async fn recycle_items<M>(
     }
 
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+
+async fn delete_image_job<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: TransactionSupprimerJobImageV2 = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles(vec![RolesCertificats::Media])?
+        && wrapper.certificate.verifier_exchanges(vec![Securite::L2Prive])?
+    {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    let delivery_info = wrapper.delivery_info.clone();
+    transaction.process_transaction(wrapper.into(), None).await?;
+
+    // Remove lease
+    let lease_collection = mongo.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
+    let lease_filtre = doc!{CHAMP_FUUID: &command.fuuid, "borrower": CHAMP_FLAG_MEDIA_TRAITE};
+    lease_collection.delete_one(lease_filtre).await?;
+
+    outbound.respond(delivery_info, ErrorMessage::ok()).await
 }

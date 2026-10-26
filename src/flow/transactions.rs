@@ -23,6 +23,7 @@ use millegrilles_common_rust::v3::{ConfigService, FormatService, TransactionRout
 use millegrilles_common_rust::bson;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use crate::flow::file_jobs::set_flag_image_traitee;
 
 pub struct FileManagerTransactionService {
     pub transaction: Arc<dyn TransactionService>,
@@ -97,7 +98,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_SUPPRIMER_VIDEO_V2 => delete_video(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => todo!(),
+            TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => delete_image_job(self.mongo.as_ref(), wrapper).await,
             COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(self.mongo.as_ref(), wrapper).await,
@@ -1446,6 +1447,34 @@ async fn recycle_items(
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.unordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn delete_image_job(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionSupprimerJobImageV2 = wrapper.message.deserialize()?;
+
+    // Indiquer que la job a ete completee et ne doit pas etre redemarree.
+    let filter = doc! { FIELD_FUUID: &transaction.fuuid };
+    let collection = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let ops = doc! {
+        "$set": { CHAMP_FLAG_MEDIA_TRAITE: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.unordered = Some(vec![
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection.namespace())
+                .filter(filter)
+                .update(ops)
+                .build()
+        )
+    ]);
 
     Ok(aggregator)
 }
