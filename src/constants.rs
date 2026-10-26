@@ -20,3 +20,7 @@ pub const TRANSACTION_DELETE_V3: &str = "deleteV3";
 pub const TRANSACTION_MOVE_V2: &str = "moveV2";
 pub const TRANSACTION_COPY_V2: &str = "copyV2";
 pub const TRANSACTION_PERMANENTLY_DELETE_FILES: &str = "permanentlyDeleteFiles";
+
+pub const DOMAIN_RELAI_SOLR: &str = "solrrelai";
+
+pub const COMMAND_REINDEX_FILES: &str = "reindexerConsignation";

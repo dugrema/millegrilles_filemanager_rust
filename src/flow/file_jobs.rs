@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use millegrilles_common_rust::bson;
 use millegrilles_common_rust::bson::{doc, Document};
 use millegrilles_common_rust::chrono::{DateTime, Duration, Utc};
-use millegrilles_common_rust::constantes::Securite;
+use millegrilles_common_rust::constantes::{Securite, DOMAINE_RELAIWEB};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::jwt_simple::prelude::{Deserialize, Serialize};
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
@@ -15,6 +15,7 @@ use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
 use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
+use millegrilles_common_rust::v3::models::ErrorMessage;
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
@@ -774,6 +775,43 @@ pub async fn set_flag_video_traite(
     };
     let collection = mongo.get_collection(NOM_COLLECTION_VIDEO_JOBS)?;
     collection.delete_many(filtre_job).await?;
+
+    Ok(())
+}
+
+pub async fn reset_indexation(mongo: &dyn MongoDao, outbound: &MessageOutboundFacade) -> Result<(), CommonError> {
+    debug!("reset_flag_indexe Reset flags pour tous les fichiers");
+
+    let filter_file_reps = doc! {};
+    let ops_file_reps = doc! {
+        "$set": { CHAMP_FLAG_INDEX: false, "flag_rag": false },
+        "$unset": { CHAMP_FLAG_INDEX_ERREUR: true },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+
+    // Reset tables rep et versions
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    collection.update_many(filter_file_reps.clone(), ops_file_reps.clone()).await?;
+
+    // Note: some indexing jobs (leases) may already exist, this is ok since we want to reindex everything.
+
+    // Reset le serveur d'indexation
+    let routage = RoutageMessageAction::builder(
+        DOMAIN_RELAI_SOLR,
+        COMMAND_REINDEX_FILES,
+        vec![Securite::L3Protege]
+    )
+        .timeout_blocking(12_000)
+        .build();
+
+    match outbound.send_command(routage, ErrorMessage::ok()).await {
+        Ok(Some(inner)) => match inner.is_err()? {
+            (true, err) => error!("Error requesting reindexation from solr server: {:?}", err),
+            _ => debug!("Reindexation command acknowledged")
+        },
+        Ok(None) => warn!("reset_indexation: No response received"),
+        Err(e) => warn!("reset_indexation Likely a timeout, reporting OK: {:?}", e),
+    };
 
     Ok(())
 }

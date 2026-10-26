@@ -20,7 +20,7 @@ use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::file_events::DelayedEventEmitterService;
-use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob, BackgroundJobParams, sauvegarder_job_video};
+use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob, BackgroundJobParams, sauvegarder_job_video, reset_indexation};
 use crate::models::TypeNode;
 
 pub async fn process_command<M>(
@@ -44,7 +44,7 @@ pub async fn process_command<M>(
                 COMMAND_CONFIRM_INDEX => confirm_indexed_file(mongo, outbound, wrapper).await,
                 COMMANDE_JOB_GET_KEY => job_get_key(format, messaging, mongo, outbound, wrapper).await,
                 COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo, outbound, wrapper).await,
-                COMMANDE_REINDEXER => todo!(),
+                COMMANDE_REINDEXER => reindex_files(mongo, outbound, wrapper).await,
                 COMMANDE_RECLAMER_FUUIDS => todo!(),
                 COMMAND_VISITS => todo!(),
                 COMMAND_CLAIM_ALL_FILES => todo!(),
@@ -418,4 +418,24 @@ async fn video_transcoder<M>(
 
     let response = CommandeVideoConvertirReponse { ok: true, job_id: Some(job.job_id) };
     outbound.respond(wrapper.delivery_info, response).await
+}
+
+async fn reindex_files<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    if wrapper.certificate.get_user_id()?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+    };
+    if ! wrapper.certificate.verifier_delegation_globale(DELEGATION_GLOBALE_PROPRIETAIRE)? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not admin")).await
+    };
+
+    match reset_indexation(mongo, outbound).await {
+        Ok(()) => outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await,
+        Err(e) => outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, format!("Error: {:?}", e).as_str())).await,
+    }
 }
