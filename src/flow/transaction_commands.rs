@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
 use crate::external::mq::*;
-use crate::flow::directories::{get_path_cuuid, parse_selection_directories};
+use crate::flow::directories::{claim_files_by_fuuids, claim_files_under_cuuids, get_path_cuuid, parse_selection_directories};
 use crate::flow::file_events::{emit_rep_update_event, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
 use crate::flow::keys::relay_attached_key;
 use crate::flow::transaction_models::*;
@@ -63,7 +63,7 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_AJOUTER_FICHIERS_COLLECTION => copy_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_DEPLACER_FICHIERS_COLLECTION => move_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
+                TRANSACTION_RECYCLE_ITEMS_V3 | TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
 
                 // Media
                 TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
@@ -1238,4 +1238,258 @@ async fn remove_web_subtitle<M>(
     }
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+#[derive(Deserialize)]
+pub struct CommandRecycleItemsV3 {
+    tuuids: Vec<String>
+}
+
+async fn recycle_items<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: CommandRecycleItemsV3 = wrapper.message.deserialize()?;
+
+    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
+
+    // Ensure that all tuuids are delete directly (supprime_indirect == false) and that they
+    // are part of a hierarchy that is not deleted.
+    let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let mut file_tuuids_by_fuuid: HashMap<String, Vec<String>> = HashMap::new();
+    let mut directory_tuuids = Vec::new();
+
+    let filter = doc!{
+        FIELD_TUUID: { "$in": &command.tuuids },
+        FIELD_USER_ID: &user_id,
+        FIELD_DELETED: true,
+    };
+    let mut cursor = collection.find(filter).await?;
+    while let Some(row) = cursor.next().await {
+        let item = row?;
+        // To recycle a file/directory, it must have been deleted directly (supprime == true, supprime_indirect == false)
+        if !(item.supprime == true && item.supprime_indirect == false) {
+            let message = format!("Item tuuid:{} not in proper state to recycle", item.tuuid);
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, message.as_str())).await
+        }
+
+        let type_node = match TypeNode::try_from(item.type_node.as_str()) {
+            Ok(inner) => inner,
+            Err(_e) => {
+                let message = format!("Item tuuid:{} not a supported node type", item.type_node);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, message.as_str())).await
+            }
+        };
+
+        match type_node {
+            TypeNode::Fichier => {
+                match item.fuuids_versions.as_ref() {
+                    Some(fuuids_versions) => {
+                        for fuuid in fuuids_versions.iter() {
+                            match file_tuuids_by_fuuid.get_mut(fuuid) {
+                                Some(tuuids) => {
+                                    tuuids.push(item.tuuid.clone());
+                                },
+                                None => {
+                                    file_tuuids_by_fuuid.insert(fuuid.clone(), vec![item.tuuid.clone()]);
+                                }
+                            }
+                        }
+                    },
+                    None => {
+                        let message = format!("File tuuid:{} has no fuuids", item.tuuid);
+                        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, message.as_str())).await
+                    }
+                }
+            }
+            _ => {
+                directory_tuuids.push(item.tuuid.clone());
+            }
+        }
+
+        // To recycle a file/directory, its hierarchy must not be deleted.
+        if let Some(cuuids) = item.path_cuuids {
+            let filtre = doc!{
+                FIELD_TUUID: {"$in": cuuids},
+                FIELD_USER_ID: &user_id,
+            };
+            let mut cursor = collection.find(filtre).await?;
+            while let Some(row) = cursor.next().await {
+                let row = row?;
+                if row.supprime {
+                    let message = format!("File tuuid:{} is under a deleted path", item.tuuid);
+                    return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, message.as_str())).await
+                }
+            }
+        };
+    }
+
+    // Ensure all files to restore still exist by claiming them
+    let fuuids: Vec<String> = file_tuuids_by_fuuid.keys().into_iter().map(|k| k.to_string()).collect();
+    claim_files_by_fuuids(outbound, &fuuids).await?;
+    drop(fuuids);
+    claim_files_under_cuuids(mongo, outbound, &user_id, &directory_tuuids).await?;
+
+    let type_node_fichier: &str = TypeNode::Fichier.into();
+    let type_node_directory: &str = TypeNode::Repertoire.into();
+    let type_node_collection: &str = TypeNode::Collection.into();
+
+    // Make a list of all fuuids indirectly deleted under directories to restore.
+    let filtre = doc! {
+        CHAMP_PATH_CUUIDS: {"$in": &directory_tuuids},
+        CHAMP_USER_ID: &user_id,
+        CHAMP_TYPE_NODE: type_node_fichier,
+        CHAMP_SUPPRIME: true,
+        CHAMP_SUPPRIME_INDIRECT: true,
+    };
+    let mut cursor = collection.find(filtre).await?;
+    while let Some(row) = cursor.next().await {
+        let item = row?;
+        if let Some(fuuids_versions) = item.fuuids_versions {
+            for fuuid in fuuids_versions.iter() {
+                match file_tuuids_by_fuuid.get_mut(fuuid) {
+                    Some(tuuids) => {
+                        tuuids.push(item.tuuid.clone());
+                    },
+                    None => {
+                        file_tuuids_by_fuuid.insert(fuuid.clone(), vec![item.tuuid.clone()]);
+                    }
+                }
+            }
+        }
+    }
+
+    // List all subdirectories with supprime_indirect == true.
+    let filtre = doc!{
+        CHAMP_PATH_CUUIDS: {"$in": &directory_tuuids},
+        CHAMP_TYPE_NODE: {"$in": vec![type_node_directory, type_node_collection]},
+        CHAMP_USER_ID: &user_id,
+        CHAMP_SUPPRIME: true,
+        CHAMP_SUPPRIME_INDIRECT: true,
+    };
+    let mut cursor = collection.find(filtre).await?;
+    while let Some(row) = cursor.next().await {
+        directory_tuuids.push(row?.tuuid);
+    }
+
+    // Build the Recycle transaction
+    let mut original_command = wrapper.message.clone();
+    original_command.certificat = None;
+    let transaction_value = TransactionRecycleItemsV4 {
+        command: Some(original_command),
+        user_id: user_id.clone(),
+        file_tuuids_by_fuuid,
+        directory_tuuids,
+    };
+
+    debug!("command_recycle_items_v3 Transaction\n{}", serde_json::to_string(&transaction_value)?);
+
+    transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_RECYCLE_ITEMS_V4,
+        serde_json::to_value(&transaction_value)?,
+        None
+    ).await?;
+
+    debug!("command_recycle_items_v3 Post transaction cleanup");
+    // Emit recycle events for each file by cuuid.
+    {
+        let mut files_by_cuuid = HashMap::new();
+        let mut tuuids = Vec::new();
+        for list_tuuids in transaction_value.file_tuuids_by_fuuid.values() {
+            tuuids.extend(list_tuuids);
+        }
+        let filtre = doc! {
+            CHAMP_TUUID: {"$in": &tuuids},
+            CHAMP_USER_ID: &user_id,
+            CHAMP_SUPPRIME: false,
+            CHAMP_TYPE_NODE: type_node_fichier,
+        };
+        let mut cursor = collection.find(filtre).await?;
+        while let Some(row) = cursor.next().await {
+            let row = row?;
+            let cuuid = match row.path_cuuids {
+                Some(path_cuuids) => {
+                    match path_cuuids.first() {
+                        Some(inner) => inner.to_owned(),
+                        None => user_id.clone(),
+                    }
+                }
+                None => user_id.clone()
+            };
+            let list = match files_by_cuuid.get_mut(&cuuid) {
+                Some(list) => list,
+                None => {
+                    files_by_cuuid.insert(cuuid.clone(), Vec::new());
+                    files_by_cuuid.get_mut(&cuuid).unwrap()
+                },
+            };
+            list.push(row.tuuid);
+        }
+
+        for (cuuid, files) in files_by_cuuid {
+            let event = CollectionEventAggregator::new(cuuid.as_str()).fichiers_ajoutes(files);
+            delayed_event_emitter_service.emit(event).await?;
+        }
+    }
+
+    if transaction_value.directory_tuuids.len() > 0 {
+        // List all immediate files/subdirectories
+        let filtre = doc! {
+            CHAMP_TUUID: {"$in": &transaction_value.directory_tuuids},
+            format!("{}.0", CHAMP_PATH_CUUIDS): {"$exists": false},
+            CHAMP_USER_ID: &user_id,
+            CHAMP_SUPPRIME: false,
+        };
+        let mut tuuids_collection = Vec::new();
+        let mut cursor = collection.find(filtre).await?;
+        while let Some(row) = cursor.next().await {
+            tuuids_collection.push(row?.tuuid);
+        }
+        if tuuids_collection.len() > 0 {
+            let event = CollectionEventAggregator::new(user_id.as_str()).collections_modifiees(tuuids_collection);
+            delayed_event_emitter_service.emit(event).await?;
+        }
+    }
+
+    // Emit event for each recycled directory
+    for cuuid in transaction_value.directory_tuuids.into_iter() {
+        let mut fichiers_ajoutes = Vec::new();
+        let mut collections_ajoutees = Vec::new();
+
+        // List all immediate files/subdirectories
+        let filtre = doc!{
+            format!("{}.0", CHAMP_PATH_CUUIDS): &cuuid,
+            CHAMP_USER_ID: &user_id,
+            CHAMP_SUPPRIME: false,
+        };
+        let mut cursor = collection.find(filtre).await?;
+        while let Some(row) = cursor.next().await {
+            let row = row?;
+            let type_node = TypeNode::try_from(row.type_node.as_str())?;
+            match type_node {
+                TypeNode::Fichier => fichiers_ajoutes.push(row.tuuid),
+                _ => collections_ajoutees.push(row.tuuid),
+            }
+        }
+
+        // Update the directory itself (deleted flags)
+        emit_rep_update_event(mongo, outbound, delayed_event_emitter_service, cuuid.as_str(), user_id.as_str()).await?;
+
+        // Update content (files and sub-directories)
+        let event = CollectionEventAggregator::new(cuuid.as_str())
+            .fichiers_ajoutes(fichiers_ajoutes)
+            .collections_ajoutees(collections_ajoutees);
+        delayed_event_emitter_service.emit(event).await?;
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }

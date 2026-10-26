@@ -86,7 +86,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             // Moving files
             TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
             TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
-            TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
+            TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
             TRANSACTION_DELETE_V3 => delete_file_reps_v3(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_MOVE_V2 => move_files_collections(self.mongo.as_ref(), wrapper).await,
@@ -117,6 +117,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_DELETE_V2 => todo!(),
             TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
             TRANSACTION_SUPPRIMER_VIDEO => todo!(),
+            TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
@@ -1371,6 +1372,80 @@ async fn remove_web_subtitle(
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn recycle_items(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionRecycleItemsV4 = wrapper.message.deserialize()?;
+    let user_id = transaction.user_id;
+
+    let mut models = Vec::with_capacity(20);
+
+    // Restore directories
+    let collection_file_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let filter_dirs = doc! {
+        FIELD_TUUID: { "$in": &transaction.directory_tuuids },
+        FIELD_USER_ID: &user_id,
+    };
+    let ops_dirs = doc! {
+        "$set": { FIELD_DELETED: false, FIELD_DELETED_INDIRECT: false },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection_file_reps.namespace())
+                .filter(filter_dirs)
+                .update(ops_dirs)
+                .build()
+        )
+    );
+
+    // Restore files in fichier_reps
+    let mut file_tuuids = Vec::new();
+    for tuuids_item in transaction.file_tuuids_by_fuuid.values() {
+        file_tuuids.extend(tuuids_item);
+    }
+    let filter_file_reps = doc! { FIELD_TUUID: { "$in": &file_tuuids }, FIELD_USER_ID: &user_id };
+    let ops_file_reps = doc! {
+        "$set": { FIELD_DELETED: false, FIELD_DELETED_INDIRECT: false },
+        "$currentDate": { FIELD_DATE_MODIFIED: true },
+    };
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection_file_reps.namespace())
+                .filter(filter_file_reps)
+                .update(ops_file_reps)
+                .build()
+        )
+    );
+
+    // Add back the tuuids by fuuids in the versions table
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    for (fuuid, tuuids) in &transaction.file_tuuids_by_fuuid {
+        let filter_version = doc! { FIELD_FUUID: fuuid };
+        let ops_version = doc! {
+            "$addToSet": { CHAMP_TUUIDS: { "$each": tuuids } },
+            "$currentDate": { FIELD_DATE_MODIFIED: true },
+        };
+        models.push(
+            WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(collection_versions.namespace())
+                    .filter(filter_version)
+                    .update(ops_version)
+                    .build()
+            )
+        );
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.unordered = Some(models);
 
     Ok(aggregator)
 }

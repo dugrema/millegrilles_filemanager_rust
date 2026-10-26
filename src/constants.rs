@@ -21,6 +21,7 @@ pub const TRANSACTION_MOVE_V2: &str = "moveV2";
 pub const TRANSACTION_COPY_V2: &str = "copyV2";
 pub const TRANSACTION_PERMANENTLY_DELETE_FILES: &str = "permanentlyDeleteFiles";
 pub const TRANSACTION_SUPPRIMER_ORPHELINS: &str = "supprimerOrphelins";
+pub const TRANSACTION_RECYCLE_ITEMS_V3: &str = "recycleItemsV3";
 
 pub const DOMAIN_RELAI_SOLR: &str = "solrrelai";
 

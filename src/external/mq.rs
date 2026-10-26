@@ -49,7 +49,7 @@ pub const TRANSACTION_DEPLACER_FICHIERS_COLLECTION: &str = "deplacerFichiersColl
 pub const TRANSACTION_SUPPRIMER_DOCUMENTS: &str = "supprimerDocuments";
 pub const TRANSACTION_RECUPERER_DOCUMENTS: &str = "recupererDocuments";
 pub const TRANSACTION_RECUPERER_DOCUMENTS_V2: &str = "recupererDocumentsV2";
-pub const TRANSACTION_RECYCLE_ITEMS_V3: &str = "recycleItemsV3";
+pub const TRANSACTION_RECYCLE_ITEMS_V4: &str = "recycleItemsV4";
 pub const TRANSACTION_ARCHIVER_DOCUMENTS: &str = "archiverDocuments";
 pub const TRANSACTION_ASSOCIER_CONVERSIONS: &str = "associerConversions";
 pub const TRANSACTION_ASSOCIER_VIDEO: &str = "associerVideo";
@@ -242,7 +242,7 @@ pub fn init_queues(mq: &MessagingServiceImpl) -> Result<(), CommonError> {
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_SUPPRIMER_DOCUMENTS), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_RECUPERER_DOCUMENTS), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_RECUPERER_DOCUMENTS_V2), exchange: Securite::L2Prive },
-                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_RECYCLE_ITEMS_V3), exchange: Securite::L2Prive },
+                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_RECYCLE_ITEMS_V4), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_ARCHIVER_DOCUMENTS), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_DECRIRE_FICHIER), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_DECRIRE_COLLECTION), exchange: Securite::L2Prive },

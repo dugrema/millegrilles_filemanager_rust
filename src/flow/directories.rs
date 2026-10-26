@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::{bson, serde_json};
 use millegrilles_common_rust::bson::{doc, Document};
 use millegrilles_common_rust::chrono::{DateTime, Utc};
@@ -7,9 +7,11 @@ use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::mongodb::ClientSession;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, warn};
+use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use serde::{Deserialize, Serialize};
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, ContactRow, NodeFichierRepOwned, RowPartagesUsager};
+use crate::flow::maintenance::verifier_visites_topologies;
 use crate::flow::request_models::{ReponseDocumentsParTuuid, ResponseFichierRepVersion, ResponseVersionCourante};
 use crate::flow::transaction_models::TransactionMoveV2Directory;
 use crate::models::TypeNode;
@@ -689,4 +691,72 @@ pub async fn parse_selection_directories<M>(
     };
 
     Ok(ParseSelectionDirectoriesResult {destination_path, files, directories})
+}
+
+pub async fn claim_files_under_cuuids<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    user_id: &String,
+    directory_tuuids: &Vec<String>
+) -> Result<Vec<String>, CommonError> where M: MongoDaoTyped {
+    let type_node_fichier: &str = TypeNode::Fichier.to_str();
+
+    let mut fuuids = HashSet::new();
+
+    let collection =
+        mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+
+    let filtre = doc! {
+        CHAMP_PATH_CUUIDS: {"$in": directory_tuuids},
+        CHAMP_USER_ID: &user_id,
+        CHAMP_TYPE_NODE: type_node_fichier,
+        CHAMP_SUPPRIME: true,
+        CHAMP_SUPPRIME_INDIRECT: true,
+    };
+    let mut cursor = collection.find(filtre).await?;
+    while let Some(row) = cursor.next().await {
+        let row = cursor.deserialize_current()?;
+        if let Some(fuuids_versions) = row.fuuids_versions {
+            fuuids.extend(fuuids_versions);
+        }
+    }
+
+    // Issue a claim command for all fuuids to restore to CoreTopologie. Ensure none have been deleted.
+    let fuuids: Vec<String> = fuuids.into_iter().collect();
+    for fuuid_batch in fuuids.chunks(100) {
+        debug!("Check batch of fuuids to restore: {:?}", fuuid_batch);
+        claim_files_by_fuuids(outbound, &fuuid_batch.to_vec()).await?;
+    }
+
+    Ok(fuuids)
+}
+
+pub async fn claim_files_by_fuuids(outbound: &MessageOutboundFacade, fuuid_batch: &Vec<String>) -> Result<(), CommonError> {
+    let fuuid_batch_ref = fuuid_batch.iter().map(|v| v.as_str()).collect();
+    match verifier_visites_topologies(outbound, &fuuid_batch_ref).await {
+        Ok(response) => {
+            if response.ok != true {
+                Err(format!("commandes.command_recycle_items_v3 Error verifying presence of files - server error: {:?}", response.err))?
+            }
+            // Claim completed. This will prevent the files from being deleted for a while.
+            // Check that all files were found. Fail if at least 1 file was already permanently deleted.
+            debug!("Batch size: {}", fuuid_batch.len());
+            if let Some(v) = response.visits {
+                debug!("Response visits: {}", v.len());
+                if v.len() < fuuid_batch.len() {
+                    Err(format!("commandes.command_recycle_items_v3 Error verifying presence of files (A) - some files have been permanently deleted: {:?}", response.err))?
+                }
+            }
+            if let Some(unknown) = response.unknown {
+                debug!("Response unknown: {}", unknown.len());
+                if unknown.len() > 0 {
+                    Err(format!("commandes.command_recycle_items_v3 Error verifying presence of files (B) - some files have been permanently deleted: {:?}", response.err))?;
+                }
+            }
+        }
+        Err(e) => {
+            Err(format!("commandes.command_recycle_items_v3 Error verifying presence of files - timeout or other issue: {:?}", e))?;
+        }
+    }
+    Ok(())
 }

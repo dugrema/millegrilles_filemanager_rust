@@ -289,3 +289,20 @@ pub struct TransactionRemoveWebSubtitle {
     pub file_fuuid: String,
     pub subtitle_fuuid: String,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionRecycleItemsV4 {
+    /// Original command
+    pub command: Option<MessageMilleGrillesOwned>,
+
+    /// User Id
+    pub user_id: String,
+
+    /// Files to restore. Fuuids are needed to re-inject the tuuids in the versions collection.
+    /// key = fuuid
+    /// value = tuuid
+    pub file_tuuids_by_fuuid: HashMap<String, Vec<String>>,
+
+    /// Directories to restore.
+    pub directory_tuuids: Vec<String>
+}
