@@ -1,28 +1,28 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use crate::constants::*;
+use crate::external::mongo::*;
+use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mq::*;
+use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, sauvegarder_job_video};
+use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
+use crate::flow::request_models::ResponseFichierRepVersion;
 use millegrilles_common_rust::bson::doc;
+use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::chrono::{DateTime, Duration, Utc};
-use millegrilles_common_rust::constantes::{Securite, DOMAINE_TOPOLOGIE};
+use millegrilles_common_rust::constantes::{DOMAINE_TOPOLOGIE, Securite};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
-use millegrilles_common_rust::{bson, serde_json, tokio};
+use millegrilles_common_rust::mongo_serde::{map_chrono_datetime_as_bson_datetime, option_chrono_04_datetime};
 use millegrilles_common_rust::tokio::select;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
-use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
-use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
+use millegrilles_common_rust::{bson, serde_json, tokio};
 use serde::{Deserialize, Serialize};
-use crate::constants::*;
-use crate::external::mongo::*;
-use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::external::mq::*;
-use crate::flow::file_jobs::{sauvegarder_job_video, BackgroundJob, BackgroundJobParams};
-use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
-use crate::flow::request_models::ResponseFichierRepVersion;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollectionEventAggregator {

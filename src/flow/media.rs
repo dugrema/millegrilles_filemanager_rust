@@ -1,19 +1,14 @@
-use millegrilles_common_rust::bson::doc;
-use millegrilles_common_rust::common_messages::InformationDechiffrageV2;
-use millegrilles_common_rust::constantes::DOMAINE_NOM_GROSFICHIERS;
-use millegrilles_common_rust::error::Error as CommonError;
-use millegrilles_common_rust::jwt_handler::CONST_DUREE_TOKEN_VALIDE;
-use millegrilles_common_rust::jwt_simple::claims::Claims;
-use millegrilles_common_rust::jwt_simple::prelude::{coarsetime, Ed25519KeyPair};
-use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
-use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
-use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
-use millegrilles_common_rust::v3::{ConfigService, FormatService, PkiService};
-use serde::{Deserialize, Serialize};
 use crate::constants::DOMAIN_NAME;
 use crate::external::mongo::{NOM_COLLECTION_FICHIERS_REP, NOM_COLLECTION_MEDIA, NOM_COLLECTION_VERSIONS};
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierVersionOwned, VideoDetail};
-use crate::flow::keys::convert_decrypted_key_vec_into_v2;
+use millegrilles_common_rust::bson::doc;
+use millegrilles_common_rust::common_messages::InformationDechiffrageV2;
+use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
+use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
+use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
+use millegrilles_common_rust::v3::ConfigService;
+use serde::{Deserialize, Serialize};
 
 pub struct InformationFichierStream {
     pub mimetype: String,
@@ -25,8 +20,10 @@ pub async fn get_information_fichier_stream<M>(
     outbound: &MessageOutboundFacade,
     user_id: &str,
     fuuid: &str,
-    fuuid_ref: Option<&str>
-) -> Result<InformationFichierStream, CommonError> where M: MongoDaoTyped {
+    fuuid_ref: Option<&str>,
+) -> Result<InformationFichierStream, CommonError> where
+    M: MongoDaoTyped,
+{
     let (fuuid_original, fuuid_video) = match fuuid_ref.as_ref() {
         Some(inner) => (*inner, Some(fuuid)),
         None => (fuuid.as_ref(), None)

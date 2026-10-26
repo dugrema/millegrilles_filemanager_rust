@@ -1,29 +1,28 @@
-use std::sync::Arc;
+use crate::constants::*;
+use crate::external::mongo::*;
+use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mq::*;
+use crate::flow::file_events::{claim_all_files, receive_visits};
+use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, RequestLeaseForBatchOperation, RequestReturnFichiersrepLease, get_batch_of_fichiersrep_leases, get_batch_of_fichiersversion_leases, lease_batch_fichiersrep, reset_indexation, return_fichiersrep_lease, sauvegarder_job_video};
+use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
+use crate::models::TypeNode;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::{Duration, Utc};
 use millegrilles_common_rust::common_messages::RequeteDechiffrage;
 use millegrilles_common_rust::constantes::*;
-use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDaoImpl, MongoDaoTyped};
-use millegrilles_common_rust::{serde_json, tokio};
 use millegrilles_common_rust::tracing::{error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
-use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, FormatService, MessagingService, PkiService};
+use millegrilles_common_rust::v3::{FormatService, MessagingService};
+use millegrilles_common_rust::{serde_json, tokio};
 use serde::{Deserialize, Serialize};
-use crate::constants::*;
-use crate::external::mongo::*;
-use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::external::mq::*;
-use crate::flow::file_events::{claim_all_files, DelayedEventEmitterService, receive_visits};
-use crate::flow::file_jobs::{get_batch_of_fichiersversion_leases, RequestLeaseForBatchOperation, get_batch_of_fichiersrep_leases, lease_batch_fichiersrep, set_flag_index_traite, return_fichiersrep_lease, RequestReturnFichiersrepLease, BackgroundJob, BackgroundJobParams, sauvegarder_job_video, reset_indexation};
-use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
-use crate::models::TypeNode;
+use std::sync::Arc;
 
 pub async fn process_command(
     format: &dyn FormatService,
@@ -47,10 +46,10 @@ pub async fn process_command(
                 COMMANDE_JOB_GET_KEY => job_get_key(format, messaging, mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMANDE_REINDEXER => reindex_files(mongo.as_ref(), outbound.as_ref(), wrapper).await,
-                COMMANDE_RECLAMER_FUUIDS => todo!(),
                 COMMAND_VISITS => command_visits(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
 
+                COMMANDE_RECLAMER_FUUIDS => todo!("Obsolete?"),
                 COMMAND_CONFIRM_RAG => todo!("Obsolete?"),
                 COMMAND_LEASE_FOR_RAG => todo!("Obsolete?"),
                 COMMAND_CONFIRMER_FICHIER_INDEXE => todo!("Obsolete?"),
@@ -327,12 +326,9 @@ async fn video_transcoder<M>(
 
     let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
     let filtre_reps = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &user_id, FIELD_DELETED: false };
-    let file = match collection_reps.find_one(filtre_reps).await? {
-        Some(file) => file,
-        None => {
-            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
-        }
-    };
+    if collection_reps.find_one(filtre_reps).await?.is_none() {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    }
 
     let filtre_fichier = doc! { FIELD_FUUID: &command.fuuid };
     let collection = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;

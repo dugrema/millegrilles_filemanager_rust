@@ -118,6 +118,7 @@ async fn reset_visits_claims<M>(
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
 struct EvenementTranscodageProgres {
     job_id: String,
     fuuid: String,
