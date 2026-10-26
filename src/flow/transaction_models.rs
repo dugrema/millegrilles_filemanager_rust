@@ -311,3 +311,28 @@ pub struct TransactionRecycleItemsV4 {
 pub struct TransactionSupprimerJobImageV2 {
     pub fuuid: String
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionAjouterContactLocal {
+    /// Usager du carnet
+    pub user_id: String,
+    /// Contact local ajoute
+    pub contact_user_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionSupprimerContacts {
+    pub contact_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionPartagerCollections {
+    pub cuuids: Vec<String>,
+    pub contact_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionSupprimerPartageUsager {
+    pub contact_id: String,
+    pub tuuid: String,
+}

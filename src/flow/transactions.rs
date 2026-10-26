@@ -13,7 +13,7 @@ use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoImpl, MongoDaoTyped};
 use millegrilles_common_rust::mongodb::ClientSession;
-use millegrilles_common_rust::mongodb::options::{DeleteOneModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::mongodb::options::{DeleteManyModel, DeleteOneModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::serde_json::Value;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::debug;
@@ -107,10 +107,10 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_conversions(self.mongo.as_ref(), wrapper, false).await,
 
             // Sharing
-            TRANSACTION_AJOUTER_CONTACT_LOCAL => todo!(),
-            TRANSACTION_SUPPRIMER_CONTACTS => todo!(),
-            TRANSACTION_PARTAGER_COLLECTIONS => todo!(),
-            TRANSACTION_SUPPRIMER_PARTAGE_USAGER => todo!(),
+            TRANSACTION_AJOUTER_CONTACT_LOCAL => share_add_contact(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_SUPPRIMER_CONTACTS => share_remove_contact(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_PARTAGER_COLLECTIONS => share_add_collection(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(self.mongo.as_ref(), wrapper).await,
 
             // Legacy but still required (no command associated)
             TRANSACTION_AJOUTER_FICHIERS_COLLECTION => todo!(),
@@ -1446,7 +1446,7 @@ async fn recycle_items(
     }
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.unordered = Some(models);
+    aggregator.ordered = Some(models);
 
     Ok(aggregator)
 }
@@ -1466,12 +1466,171 @@ async fn delete_image_job(
     };
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.unordered = Some(vec![
+    aggregator.ordered = Some(vec![
         WriteModel::UpdateOne(
             UpdateOneModel::builder()
                 .namespace(collection.namespace())
                 .filter(filter)
                 .update(ops)
+                .build()
+        )
+    ]);
+
+    Ok(aggregator)
+}
+
+async fn share_add_contact(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionAjouterContactLocal = wrapper.message.deserialize()?;
+    let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
+
+    let filter = doc! {
+        CHAMP_CONTACT_ID: &wrapper.message.id,
+        CHAMP_USER_ID: &transaction.user_id,
+        "contact_user_id": &transaction.contact_user_id,
+    };
+    let ops = doc! {
+        "$setOnInsert": {
+            CHAMP_USER_ID: &transaction.user_id,
+            "contact_user_id": &transaction.contact_user_id,
+            FIELD_DATE_CREATED: &created,
+        },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection = mongo.get_collection(NOM_COLLECTION_PARTAGE_CONTACT)?;
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(vec![
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection.namespace())
+                .filter(filter)
+                .update(ops)
+                .upsert(true)
+                .build()
+        )
+    ]);
+
+    Ok(aggregator)
+}
+
+async fn share_remove_contact(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionSupprimerContacts = wrapper.message.deserialize()?;
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return Err(CommonError::Str("User_id missing from cetificate"))
+    };
+
+    let mut models = Vec::with_capacity(2);
+
+    let filtre = doc! {
+        CHAMP_USER_ID: &user_id,
+        CHAMP_CONTACT_ID: {"$in": &transaction.contact_ids},
+    };
+    let collection_contacts = mongo.get_collection(NOM_COLLECTION_PARTAGE_CONTACT)?;
+    models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_contacts.namespace())
+                .filter(filtre.clone())
+                .build()
+        )
+    );
+
+    // Remove all shared collections associated to deleted contacts
+    let collection_shared_collections = mongo.get_collection(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
+    models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_shared_collections.namespace())
+                .filter(filtre)
+                .build()
+        )
+    );
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.unordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn share_add_collection(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionPartagerCollections = wrapper.message.deserialize()?;
+    let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return Err(CommonError::Str("User_id missing from cetificate"))
+    };
+
+    let mut models = Vec::with_capacity(transaction.contact_ids.len() + transaction.cuuids.len());
+
+    let collection = mongo.get_collection(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
+    for contact_id in &transaction.contact_ids {
+        for cuuid in &transaction.cuuids {
+            let filter = doc! {
+                CHAMP_USER_ID: &user_id,
+                CHAMP_CONTACT_ID: &contact_id,
+                CHAMP_TUUID: cuuid,
+            };
+            let ops = doc! {
+                "$setOnInsert": {
+                    CHAMP_USER_ID: &user_id,
+                    CHAMP_CONTACT_ID: &contact_id,
+                    CHAMP_TUUID: cuuid,
+                    FIELD_DATE_CREATED: &created,
+                },
+                "$currentDate": { FIELD_DATE_MODIFIED: true }
+            };
+            models.push(
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(collection.namespace())
+                        .filter(filter)
+                        .update(ops)
+                        .upsert(true)
+                        .build()
+                )
+            );
+        }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.unordered = Some(models);
+
+    Ok(aggregator)
+}
+
+async fn share_remove_collection(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionSupprimerPartageUsager = wrapper.message.deserialize()?;
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(user_id) => user_id,
+        None => return Err(CommonError::Str("User_id missing from certificate"))
+    };
+
+    let filtre = doc! {
+        CHAMP_USER_ID: &user_id,
+        CHAMP_CONTACT_ID: transaction.contact_id,
+        CHAMP_TUUID: transaction.tuuid,
+    };
+    let collection = mongo.get_collection(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.unordered = Some(vec![
+        WriteModel::DeleteOne(
+            DeleteOneModel::builder()
+                .namespace(collection.namespace())
+                .filter(filtre)
                 .build()
         )
     ]);

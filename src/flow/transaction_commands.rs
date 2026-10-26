@@ -1,14 +1,19 @@
-use std::collections::{HashMap, HashSet};
-use millegrilles_common_rust::bson::doc;
 use crate::constants::*;
+use crate::external::mongo::*;
+use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
+use crate::flow::access::verify_user_certificate;
 use crate::flow::directories::{claim_files_by_fuuids, claim_files_under_cuuids, get_path_cuuid, parse_selection_directories};
-use crate::flow::file_events::{emit_rep_update_event, emettre_evenement_maj_fichier, CollectionEventAggregator, DelayedEventEmitterService, touch_fichiers_rep, emit_update_events_by_fuuids};
+use crate::flow::file_events::*;
+use crate::flow::file_jobs::{BackgroundJob, remove_lease, sauvegarder_job_video, set_flag_image_traitee, set_flag_video_traite, trigger_file_indexing};
 use crate::flow::keys::relay_attached_key;
+use crate::flow::maintenance::verifier_visites_topologies;
 use crate::flow::transaction_models::*;
 use crate::flow::transactions::FileManagerTransactionService;
+use crate::models::TypeNode;
+use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::constantes::{Securite, ROLE_MEDIA, ROLE_OLLAMA_RELAI, RolesCertificats};
+use millegrilles_common_rust::constantes::{ROLE_MEDIA, ROLE_OLLAMA_RELAI, RolesCertificats, Securite};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
@@ -17,18 +22,13 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, error, info, warn};
+use millegrilles_common_rust::tracing::{debug, error, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
-use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
-use millegrilles_common_rust::v3::{ConfigService, DocumentEncryptionService, MessagingService};
+use millegrilles_common_rust::v3::models::ErrorMessage;
+use millegrilles_common_rust::v3::{DocumentEncryptionService, MessagingService};
 use serde::Serialize;
-use crate::external::mongo::*;
-use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
-use crate::flow::file_jobs::{remove_lease, set_flag_image_traitee, BackgroundJob, sauvegarder_job_video, trigger_file_indexing, set_flag_video_traite};
-use crate::flow::maintenance::verifier_visites_topologies;
-use crate::models::TypeNode;
+use std::collections::{HashMap, HashSet};
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -75,10 +75,10 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
 
                 // Sharing
-                TRANSACTION_AJOUTER_CONTACT_LOCAL => todo!(),
-                TRANSACTION_SUPPRIMER_CONTACTS => todo!(),
-                TRANSACTION_PARTAGER_COLLECTIONS => todo!(),
-                TRANSACTION_SUPPRIMER_PARTAGE_USAGER => todo!(),
+                TRANSACTION_AJOUTER_CONTACT_LOCAL => share_add_contact(mongo, outbound, transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_CONTACTS => share_remove_contact(mongo, outbound, transaction, wrapper).await,
+                TRANSACTION_PARTAGER_COLLECTIONS => share_add_collection(mongo, outbound, transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(mongo, outbound, transaction, wrapper).await,
 
                 // Obsolete?
                 TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("Obsolete?"),
@@ -1514,8 +1514,65 @@ async fn delete_image_job<M>(
 
     // Remove lease
     let lease_collection = mongo.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
-    let lease_filtre = doc!{CHAMP_FUUID: &command.fuuid, "borrower": CHAMP_FLAG_MEDIA_TRAITE};
+    let lease_filtre = doc!{ FIELD_FUUID: &command.fuuid, "borrower": CHAMP_FLAG_MEDIA_TRAITE };
     lease_collection.delete_one(lease_filtre).await?;
 
     outbound.respond(delivery_info, ErrorMessage::ok()).await
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CommandeAjouterContactLocal {
+    nom_usager: String,
+}
+
+#[derive(Serialize)]
+struct CommandeAjouterContactLocalReponse {
+    ok: bool,
+    nom_usager: String,
+    user_id: String,
+    contact_id: String
+}
+
+async fn share_add_contact<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: CommandeAjouterContactLocal = wrapper.message.deserialize()?;
+    todo!()
+}
+
+async fn share_remove_contact<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionPartagerCollections = wrapper.message.deserialize()?;
+    todo!()
+}
+
+async fn share_add_collection<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionSupprimerPartageUsager = wrapper.message.deserialize()?;
+    todo!()
+}
+
+async fn share_remove_collection<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    transaction: &FileManagerTransactionService,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    let command: TransactionSupprimerJobImageV2 = wrapper.message.deserialize()?;
+    todo!()
 }
