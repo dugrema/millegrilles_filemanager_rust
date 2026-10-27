@@ -1118,6 +1118,8 @@ pub struct TransactionAjouterFichiersCollection {
     pub include_deleted: Option<bool>,  // Allows copying from trash to new section
 }
 
+const COPY_FILE_BATCH_SIZE: usize = 250;
+
 async fn copy_files_collections<M>(
     mongo: &M,
     outbound: &MessageOutboundFacade,
@@ -1298,6 +1300,22 @@ async fn copy_files_collections<M>(
 
     let file_entries = get_complete_copy(mongo, filter_files).await?;
     for mut file in file_entries {
+        if transaction_value.entries.len() >= COPY_FILE_BATCH_SIZE {
+            let transaction_json = serde_json::to_value(&transaction_value)?;
+            debug!("New transaction:\n{}", transaction_json);
+
+            transaction.process_value(
+                DOMAIN_NAME,
+                TRANSACTION_COPY_V3,
+                transaction_json,
+                Some(&mut session)
+            ).await?;
+
+            batch_counter += 1;
+            transaction_value.entries.clear();
+            transaction_value.batch_no = Some(batch_counter);
+        }
+
         let cuuid = match file.file_rep.path_cuuids.as_ref() {
             Some(path_cuuids) => match path_cuuids.get(0) {
                 Some(cuuid) => cuuid,
@@ -1325,15 +1343,22 @@ async fn copy_files_collections<M>(
         transaction_value.entries.push(file);
     }
 
-    let transaction_value = serde_json::to_value(&transaction_value)?;
-    debug!("New transaction:\n{}", transaction_value);
+    if ! transaction_value.entries.is_empty() {
+        if batch_counter == 1 {
+            // No batching used
+            transaction_value.batch_no = None;
+        }
+        let transaction_json = serde_json::to_value(&transaction_value)?;
+        debug!("New transaction:\n{}", transaction_json);
 
-    transaction.process_value(
-        DOMAIN_NAME,
-        TRANSACTION_COPY_V3,
-        transaction_value,
-        Some(&mut session)
-    ).await?;
+        transaction.process_value(
+            DOMAIN_NAME,
+            TRANSACTION_COPY_V3,
+            transaction_json,
+            Some(&mut session)
+        ).await?;
+    }
+    drop(transaction_value);
 
     session.commit_transaction().await?;
 

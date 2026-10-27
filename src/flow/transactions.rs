@@ -1724,12 +1724,25 @@ async fn copy_files_collections(
     }
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.batch_insertions = Some(vec![
-        BatchInsertions::new(NOM_COLLECTION_FICHIERS_REP, insertions_filerep),
-        BatchInsertions::new(NOM_COLLECTION_MEDIA, insertions_media),
-        BatchInsertions::new(NOM_COLLECTION_FILE_COMMENTS, insertions_comments),
-    ]);
-    aggregator.ordered = Some(models);
+
+    let mut vec_batches = Vec::new();
+    if ! insertions_filerep.is_empty() {
+        vec_batches.push(BatchInsertions::new(NOM_COLLECTION_FICHIERS_REP, insertions_filerep));
+    }
+    if ! insertions_media.is_empty() {
+        vec_batches.push(BatchInsertions::new(NOM_COLLECTION_MEDIA, insertions_media));
+    }
+    if ! insertions_comments.is_empty() {
+        vec_batches.push(BatchInsertions::new(NOM_COLLECTION_FILE_COMMENTS, insertions_comments));
+    }
+
+    if ! vec_batches.is_empty() {
+        aggregator.batch_insertions = Some(vec_batches);
+    }
+
+    if ! models.is_empty() {
+        aggregator.ordered = Some(models);
+    }
 
     Ok(aggregator)
 }
