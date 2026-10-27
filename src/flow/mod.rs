@@ -16,3 +16,4 @@ pub mod file_jobs;
 mod access;
 mod media;
 mod transaction_legacy;
+mod sharing;

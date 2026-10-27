@@ -49,6 +49,7 @@ pub async fn process_command(
                 COMMAND_VISITS => command_visits(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
 
+                // Obsolete?
                 COMMANDE_RECLAMER_FUUIDS => todo!("Obsolete?"),
                 COMMAND_CONFIRM_RAG => todo!("Obsolete?"),
                 COMMAND_LEASE_FOR_RAG => todo!("Obsolete?"),

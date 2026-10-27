@@ -3,6 +3,7 @@ pub const DOMAIN_NAME_NEW: &str = "FileManager";
 pub const DOMAIN_KEYMASTER: &str = "MaitreDesCles";
 pub const DOMAINE_FILECONTROLER_NOM: &str = "filecontroler";
 pub const DOMAINE_MEDIA_NOM: &str = "media";
+pub const DOMAIN_RELAI_SOLR: &str = "solrrelai";
 
 pub const DELEGATION_OWNER: &str = "proprietaire";
 
@@ -23,6 +24,6 @@ pub const TRANSACTION_PERMANENTLY_DELETE_FILES: &str = "permanentlyDeleteFiles";
 pub const TRANSACTION_SUPPRIMER_ORPHELINS: &str = "supprimerOrphelins";
 pub const TRANSACTION_RECYCLE_ITEMS_V3: &str = "recycleItemsV3";
 
-pub const DOMAIN_RELAI_SOLR: &str = "solrrelai";
-
 pub const COMMAND_REINDEX_FILES: &str = "reindexerConsignation";
+
+pub const REQUEST_GET_USER_LIST: &str = "getListeUsagers";

@@ -1,12 +1,12 @@
 use crate::constants::{DOMAIN_NAME, ROLE_USAGER};
 use crate::external::mongo::*;
 use crate::external::mq::*;
-use crate::flow::access::verifier_acces_usager_media;
+use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
 use crate::flow::directories::{ResultatStatistiquesRow, get_complete_files, get_directory_navigation_headers, get_shared_tuuid};
 use crate::flow::file_jobs::BackgroundJob;
 use crate::flow::keys::convert_decrypted_key_into_v2;
 use crate::flow::media::get_information_fichier_stream;
-use crate::flow::request_models::ResponseFichierRepVersion;
+use crate::flow::request_models::*;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::DateTime;
@@ -23,6 +23,8 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use crate::external::mongo_struct::RowPartagesUsager;
+use crate::flow::sharing::{get_contacts_user, map_user_ids_nom_usager};
 
 pub async fn process_request<M>(
     config: &dyn ConfigService,
@@ -46,22 +48,22 @@ pub async fn process_request<M>(
                 REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
                 REQUETE_JOBS_VIDEO => request_video_conversion_job(mongo, outbound, wrapper).await,
                 REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
-
-                REQUETE_GET_CORBEILLE => todo!(),
-                REQUETE_GET_CLES_FICHIERS => todo!(),
-                REQUETE_VERIFIER_ACCES_FUUIDS => todo!(),
-                REQUETE_VERIFIER_ACCES_TUUIDS => todo!(),
-                REQUETE_SYNC_COLLECTION => todo!(),
-                REQUETE_SYNC_CORBEILLE => todo!(),
-                REQUETE_CHARGER_CONTACTS => todo!(),
-                REQUETE_PARTAGES_USAGER => todo!(),
+                REQUETE_PARTAGES_USAGER => user_shared_collections(mongo, outbound, wrapper).await,
+                REQUETE_CHARGER_CONTACTS => user_shared_contacts(mongo, outbound, wrapper).await,
                 REQUETE_PARTAGES_CONTACT => todo!(),
-                REQUETE_STRUCTURE_REPERTOIRE => todo!(),
-                REQUETE_SOUS_REPERTOIRES => todo!(),
-                REQUETE_RECHERCHE_INDEX => todo!(),
-                REQUETE_INFO_VIDEO => todo!(),
                 REQUETE_SEARCH_INDEX_V2 => todo!(),
 
+                // Obsolete?
+                REQUETE_GET_CLES_FICHIERS => todo!("Obsolete?"),
+                REQUETE_VERIFIER_ACCES_FUUIDS => todo!("Obsolete?"),
+                REQUETE_VERIFIER_ACCES_TUUIDS => todo!("Obsolete?"),
+                REQUETE_STRUCTURE_REPERTOIRE => todo!("Obsolete?"),
+                REQUETE_SYNC_COLLECTION => todo!("Obsolete?"),
+                REQUETE_SOUS_REPERTOIRES => todo!("Obsolete?"),
+                REQUETE_RECHERCHE_INDEX => todo!("Obsolete?"),
+                REQUETE_INFO_VIDEO => todo!("Obsolete?"),
+                REQUETE_GET_CORBEILLE => todo!("Obsolete?"),
+                REQUETE_SYNC_CORBEILLE => todo!("Obsolete?"),
                 REQUETE_ACTIVITE_RECENTE => todo!("Obsolete?"),
                 REQUETE_FAVORIS => todo!("Obsolete?"),
                 _ => {
@@ -514,4 +516,92 @@ async fn create_jwt_streaming<M>(
     //     jwt_token: Some(jwt_token)
     // };
     // outbound.respond_encrypted(wrapper.delivery_info, reponse, wrapper.certificate.as_ref()).await?;
+}
+
+#[derive(Deserialize)]
+struct RequetePartagesUsager { contact_id: Option<String> }
+
+#[derive(Serialize)]
+struct ReponsePartagesUsager {
+    ok: bool,
+    partages: Vec<RowPartagesUsager>,
+    usagers: Option<Vec<ReponseUsager>>,
+}
+
+async fn user_shared_collections<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    debug!("user_shared_collections");
+    let request: RequetePartagesUsager = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
+
+    let mut filtre = doc! { CHAMP_USER_ID: &user_id };
+    if let Some(inner) = request.contact_id.as_ref() {
+        filtre.insert(CHAMP_CONTACT_ID, inner );
+    }
+    let collection = mongo.get_collection_typed::<RowPartagesUsager>(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
+    let mut curseur = collection.find(filtre).await?;
+
+    let mut partages = Vec::new();
+    while let Some(row) = curseur.next().await {
+        partages.push(row?);
+    }
+
+    let response = ReponsePartagesUsager { ok: true, partages, usagers: None };
+
+    outbound.respond(wrapper.delivery_info, response).await
+}
+
+#[derive(Deserialize)]
+struct RequetePartagesContact {
+    // user_id: Option<String>
+}
+
+async fn user_shared_contacts<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    debug!("user_shared_collections");
+    let request: RequetePartagesContact = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
+
+    // Charger la liste des contact_id qui correspondent a l'usager courant
+    let contacts = get_contacts_user(mongo, user_id.as_str()).await?;
+
+    // Faire une requete pour obtenir tous les partages associes aux contacts
+    let contact_ids: Vec<&str> = contacts.iter().map(|c| c.contact_id.as_str()).collect();
+    let filtre = doc! {
+        CHAMP_CONTACT_ID: { "$in": contact_ids },
+    };
+    let collection = mongo.get_collection_typed::<RowPartagesUsager>(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
+    let mut curseur = collection.find(filtre).await?;
+    let partages = {
+        let mut partages = Vec::new();
+        while let Some(row) = curseur.next().await {
+            partages.push(row?);
+        }
+        partages
+    };
+
+    // Faire une requete pour obtenir l'information des usagers. Dedupe avec HashSet
+    let mut user_ids = HashSet::new();
+    user_ids.extend(partages.iter().map(|s| s.user_id.as_str()));
+    let user_ids: Vec<&str> = user_ids.into_iter().collect();
+
+    let usagers = map_user_ids_nom_usager(outbound, &user_ids).await?;
+
+    let response = ReponsePartagesUsager { ok: true, partages, usagers: Some(usagers) };
+
+    outbound.respond(wrapper.delivery_info, response).await
 }

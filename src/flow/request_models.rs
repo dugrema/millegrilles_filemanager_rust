@@ -156,3 +156,16 @@ impl From<NodeFichierRepOwned> for ResponseFichierRepVersion {
 pub struct ReponseDocumentsParTuuid {
     pub fichiers: Vec<ResponseFichierRepVersion>
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct ReponseUsager {
+    #[serde(rename(deserialize = "userId"))]
+    pub user_id: String,
+    #[serde(rename(deserialize = "nomUsager"))]
+    pub nom_usager: String,
+}
+
+#[derive(Deserialize)]
+pub struct ResponseUsersList {
+    pub usagers: Vec<ReponseUsager>,
+}
