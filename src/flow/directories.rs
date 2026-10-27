@@ -182,7 +182,7 @@ pub struct ResultatStatistiquesRow {
     pub count: usize,
 }
 
-async fn get_directory_statistics(
+pub async fn get_directory_statistics(
     mongo: &dyn MongoDao,
     filter: Document
 ) -> Result<Vec<ResultatStatistiquesRow>, CommonError> {

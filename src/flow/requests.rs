@@ -2,7 +2,7 @@ use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mq::*;
 use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
-use crate::flow::directories::{ResultatStatistiquesRow, get_complete_files, get_directory_navigation_headers, get_shared_tuuid};
+use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_directory_statistics, get_shared_tuuid, ResultatStatistiquesRow};
 use crate::flow::file_jobs::BackgroundJob;
 use crate::flow::keys::{convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2};
 use crate::flow::media::get_information_fichier_stream;
@@ -23,6 +23,7 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use millegrilles_common_rust::bson;
 use millegrilles_common_rust::generateur_messages::{RoutageMessageAction, RoutingValidation};
 use crate::external::mongo_struct::{ContactRow, RowPartagesUsager};
 use crate::flow::sharing::{get_contacts_user, map_user_ids_nom_usager};
@@ -265,10 +266,49 @@ async fn request_statistics_info<M>(
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
     debug!("request_statistics_info");
+    let request: RequeteInfoStatistiques = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
 
-    todo!();
+    let user_id = if let Some(contact_id) = request.contact_id {
+        todo!("share")
+        // // Determiner le user_id effectif pour la requete en confirmant le droit d'acces via contact
+        // let filtre = doc!{ CHAMP_CONTACT_ID: contact_id, CHAMP_CONTACT_USER_ID: &user_id };
+        // let collection = mongo.get_collection_typed::<ContactRow>(NOM_COLLECTION_PARTAGE_CONTACT)?;
+        // match collection.find_one(filtre).await? {
+        //     Some(inner) => inner.user_id ,  // User id du proprietaire des fichiers
+        //     None => {
+        //         error!("requetes.requete_verifier_acces_fuuids Acces refuse, mauvais contact_id");
+        //         return return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+        //     }
+        // }
+    } else {
+        user_id
+    };
 
-    Ok(())
+    let mut filter = doc! {
+        FIELD_USER_ID: &user_id,
+        FIELD_DELETED: false,
+        FIELD_DELETED_INDIRECT: false,
+    };
+
+    if let Some(cuuid) = request.cuuid.as_ref() {
+        // Filter on directory
+        filter.insert(
+            "$or",
+            bson::serialize_to_bson(&vec![
+                doc!{CHAMP_TUUID: &cuuid},
+                doc!{CHAMP_PATH_CUUIDS: &cuuid}
+            ])?
+        );
+    }
+
+    let resultat = get_directory_statistics(mongo, filter).await?;
+    let response = ReponseInfoStatistiques { info: resultat };
+
+    outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
 }
 
 fn extract_key_ids_from_file(r: &ResponseFichierRepVersion) -> Result<Vec<&String>, CommonError> {
