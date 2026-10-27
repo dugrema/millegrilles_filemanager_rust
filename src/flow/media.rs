@@ -180,7 +180,7 @@ pub fn generer_jwt(
     mimetype: &str,
     dechiffrage: InformationDechiffrageV2
 ) -> Result<String, CommonError> where {
-    todo!()
+    todo!("streaming")
     // let user_id = user_id.to_string();
     // let fuuid = fuuid.to_string();
     // let mimetype = mimetype.to_string();

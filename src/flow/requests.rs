@@ -379,7 +379,7 @@ async fn request_files_by_tuuid<M>(
     let shared = request.shared_contact_id.is_some() || request.shared == Some(true);
 
     if shared {
-        todo!();
+        todo!("share");
     }
 
     let user_ids: Vec<String> = user_ids.into_iter().collect();
@@ -495,7 +495,7 @@ async fn create_jwt_streaming<M>(
 
     let user_id = match request.contact_id.as_ref() {
         Some(contact_id) => {
-            todo!()
+            todo!("share")
             // // Verifier que le contact_id et les contact_user_id correspondent, extraire user_id partage
             // let filtre = doc! { CHAMP_CONTACT_ID: &contact_id, CHAMP_CONTACT_USER_ID: user_id };
             // let collection = mongo.get_collection_typed::<RowPartageContactOwned>(NOM_COLLECTION_PARTAGE_CONTACT)?;
@@ -527,7 +527,7 @@ async fn create_jwt_streaming<M>(
     debug!("requete_verifier_acces_fuuids Charger information de dechiffrage pour {}", request.fuuid);
     let fuuid_ref = match request.fuuid_ref.as_ref() { Some(inner) => Some(inner.as_str()), None => None };
     let info_stream = get_information_fichier_stream(mongo, outbound, &user_id, &request.fuuid, fuuid_ref).await?;
-    todo!()
+    todo!("streaming")
     // let jwt_token = generer_jwt(mongo, &user_id, &request.fuuid, info_stream.mimetype, info_stream.dechiffrage)?;
     //
     // // let reponse = json!({ "fuuids_acces": resultat , "acces_tous": acces_tous, "user_id": user_id });

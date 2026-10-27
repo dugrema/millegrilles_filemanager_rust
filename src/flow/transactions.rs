@@ -110,14 +110,14 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(self.mongo.as_ref(), wrapper).await,
 
             // Legacy but still required (no command associated)
-            TRANSACTION_AJOUTER_FICHIERS_COLLECTION => todo!(),
-            TRANSACTION_RECUPERER_DOCUMENTS => todo!(),
-            TRANSACTION_DELETE_V2 => todo!(),
-            TRANSACTION_SUPPRIMER_DOCUMENTS => todo!(),
-            TRANSACTION_SUPPRIMER_VIDEO => todo!(),
-            TRANSACTION_RECYCLE_ITEMS_V3 => todo!(),
-            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!(),
-            TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!(),
+            TRANSACTION_AJOUTER_FICHIERS_COLLECTION => todo!("legacy"),
+            TRANSACTION_RECUPERER_DOCUMENTS => todo!("legacy"),
+            TRANSACTION_DELETE_V2 => todo!("legacy"),
+            TRANSACTION_SUPPRIMER_DOCUMENTS => todo!("legacy"),
+            TRANSACTION_SUPPRIMER_VIDEO => todo!("legacy"),
+            TRANSACTION_RECYCLE_ITEMS_V3 => todo!("legacy"),
+            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!("legacy"),
+            TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("legacy"),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
