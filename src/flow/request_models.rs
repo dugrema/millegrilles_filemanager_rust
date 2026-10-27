@@ -29,7 +29,7 @@ impl From<FileComment> for FileCommentResponse {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResponseVersionCourante {
     pub fuuid: String,
     pub mimetype: String,
@@ -76,7 +76,7 @@ pub struct ResponseVersionCourante {
     pub verification: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResponseFichierRepVersion {
     pub tuuid: String,
     pub user_id: String,

@@ -6,6 +6,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::Encryp
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use serde::{Deserialize, Serialize};
 use crate::external::mongo_struct::{AudioDetail, ImageDetail, MediaWebSubtitleDetail, SubtitleDetail};
+use crate::flow::request_models::ResponseFichierRepVersion;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionNouvelleCollection {
@@ -335,4 +336,23 @@ pub struct TransactionPartagerCollections {
 pub struct TransactionSupprimerPartageUsager {
     pub contact_id: String,
     pub tuuid: String,
+}
+
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionCopyV3 {
+    /// Original user command
+    pub command: MessageMilleGrillesOwned,
+    /// Full entries to be copied in the database.
+    /// version_courante is empty since this copy will link to an existing record source using fuuids_versions.
+    pub entries: Vec<ResponseFichierRepVersion>,
+    /// Top level destination for reference - this has already been set in all entries
+    pub destination: Vec<String>,
+    /// The destination user_id
+    pub user_id: String,
+    /// When true, this is a copy from a recycling bin (deleted files being copied out)
+    pub include_deleted: bool,
+    /// This transaction type can be large, batches are used to split the work.
+    /// When present this refers to this transaction's position in the batch.
+    pub batch_no: Option<u32>,
 }

@@ -693,7 +693,7 @@ pub async fn parse_selection_directories<M>(
     Ok(ParseSelectionDirectoriesResult {destination_path, files, directories})
 }
 
-pub async fn claim_files_under_cuuids<M>(
+pub async fn claim_files_under_deleted_cuuids<M>(
     mongo: &M,
     outbound: &MessageOutboundFacade,
     user_id: &String,
@@ -758,5 +758,42 @@ pub async fn claim_files_by_fuuids(outbound: &MessageOutboundFacade, fuuid_batch
             Err(format!("commandes.command_recycle_items_v3 Error verifying presence of files - timeout or other issue: {:?}", e))?;
         }
     }
+    Ok(())
+}
+
+pub async fn claim_files_by_deleted_tuuids<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    user_id: &str,
+    tuuid_batch: &Vec<String>
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let type_node_fichier: &str = TypeNode::Fichier.to_str();
+    let mut fuuids = HashSet::new();
+
+    let collection =
+        mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+
+    let filtre = doc! {
+        FIELD_TUUID: { "$in": tuuid_batch },
+        CHAMP_USER_ID: &user_id,
+        CHAMP_TYPE_NODE: type_node_fichier,
+        CHAMP_SUPPRIME: true,
+        CHAMP_SUPPRIME_INDIRECT: true,
+    };
+    let mut cursor = collection.find(filtre).await?;
+    while let Some(row) = cursor.next().await {
+        let row = cursor.deserialize_current()?;
+        if let Some(fuuids_versions) = row.fuuids_versions {
+            fuuids.extend(fuuids_versions);
+        }
+    }
+
+    // Issue a claim command for all fuuids to restore to CoreTopologie. Ensure none have been deleted.
+    let fuuids: Vec<String> = fuuids.into_iter().collect();
+    for fuuid_batch in fuuids.chunks(100) {
+        debug!("Check batch of fuuids to restore: {:?}", fuuid_batch);
+        claim_files_by_fuuids(outbound, &fuuid_batch.to_vec()).await?;
+    }
+
     Ok(())
 }

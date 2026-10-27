@@ -22,6 +22,13 @@ pub fn verify_user_certificate(certificate: &EnveloppeCertificat) -> Result<Stri
     Ok(user_id)
 }
 
+pub async fn verify_user_access_tuuids(mongo: &dyn MongoDao, user_id: &str, tuuids: &Vec<String>) -> Result<bool, CommonError> {
+    let filter = doc!{ FIELD_TUUID: { "$in": tuuids }, FIELD_USER_ID: user_id };
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let count = collection.count_documents(filter).await? as usize;
+    Ok(tuuids.len() == count)
+}
+
 pub async fn verifier_acces_usager_media<M>(
     mongo: &M,
     user_id: &str,

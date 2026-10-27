@@ -2,8 +2,8 @@ use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
-use crate::flow::access::verify_user_certificate;
-use crate::flow::directories::{claim_files_by_fuuids, claim_files_under_cuuids, get_path_cuuid, parse_selection_directories};
+use crate::flow::access::{verifier_acces_usager_media, verify_user_access_tuuids, verify_user_certificate};
+use crate::flow::directories::{claim_files_by_deleted_tuuids, claim_files_by_fuuids, claim_files_under_deleted_cuuids, get_complete_files, get_path_cuuid, parse_selection_directories};
 use crate::flow::file_events::*;
 use crate::flow::file_jobs::{BackgroundJob, remove_lease, sauvegarder_job_video, set_flag_image_traitee, set_flag_video_traite, trigger_file_indexing};
 use crate::flow::keys::relay_attached_key;
@@ -22,7 +22,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::serde_json;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, error, warn};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
@@ -1127,8 +1127,128 @@ async fn copy_files_collections<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     let command: TransactionAjouterFichiersCollection = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
+    let include_deleted = command.include_deleted.unwrap_or(false);
 
-    todo!()
+    let user_id_source = match command.contact_id.as_ref() {
+        Some(contact_id) => todo!("share"),
+        None => user_id.clone()
+    };
+
+    let mut session = mongo.get_session().await?;
+    session.start_transaction().await?;
+
+    // Verify user acces to files
+    if ! verify_user_access_tuuids(mongo, user_id_source.as_str(), &command.inclure_tuuids).await? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+    let content_to_copy = parse_selection_directories(
+        mongo,
+        user_id_source.as_str(),
+        command.cuuid.as_str(),
+        &command.inclure_tuuids,
+        false,
+        include_deleted,
+        &mut session,
+    ).await?;
+    session.commit_transaction().await?;  // No need to keep locks
+
+    // Check for cycles (ensure the destination is not under the source (moving under itself breaks the graph)
+    if let Some(directory_moves) = content_to_copy.directories.as_ref() {
+        for directory_move in directory_moves {
+            for directory in &directory_move.directories {
+                if content_to_copy.destination_path.contains(directory) {
+                    debug!("copy_files_collections Rejecting copy directory, the destination is under the source (this breaks the graph)");
+                    return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Cannot copy a directory under itself")).await
+                }
+            }
+        }
+    }
+
+    if include_deleted {
+        // This is a copy out of the recycling bin - the files will be extracted and marked as not deleted
+        // Fails when at least one file has already been permanently deleted.
+        if let Some(files) = content_to_copy.files.as_ref() {
+            if let Err(e) = claim_files_by_deleted_tuuids(mongo, outbound, user_id.as_str(), files).await {
+                info!("claim_files_by_deleted_tuuids File already deleted : {:?}", e);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "At least one file has already been permanently deleted")).await
+            }
+        }
+
+        if let Some(directory_moves) = content_to_copy.directories.as_ref() {
+            // Check that all files to copy still exist;
+            let mut cuuids = Vec::new();
+            for directory in directory_moves {
+                cuuids.extend(directory.directories.clone());
+            }
+            if let Err(e) = claim_files_under_deleted_cuuids(mongo, outbound, &user_id, &cuuids).await {
+                info!("claim_files_by_deleted_tuuids File under directory already deleted : {:?}", e);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "At least one file has already been permanently deleted")).await
+            }
+        }
+    }
+
+    session.start_transaction().await?;
+    let mut command_copy = wrapper.message.clone();
+    command_copy.certificat = None;  // Remove certificate, keeping a copy for reference
+
+    let mut batch_counter = 1;
+    let mut transaction_value = TransactionCopyV3 {
+        command: command_copy.clone(),
+        entries: vec![],
+        destination: content_to_copy.destination_path.clone(),
+        user_id: user_id.clone(),
+        include_deleted,
+        batch_no: Some(batch_counter),
+    };
+
+    // Load files/directories and produce transactions.
+    // content_to_copy.files only includes files specifically selected by the user
+    // We need to go by directory to retrieve files and update their path.
+    if let Some(files) = content_to_copy.files {
+        let filter = doc!{ FIELD_TUUID: { "$in": &files }, "user_id": &user_id_source };
+        let (file_list, _) = get_complete_files(mongo, filter, None, None, None).await?;
+        for mut file in file_list.fichiers {
+            file.version_courante = None;  // Not keeping this, only fuuids_versions is needed to link back
+            transaction_value.entries.push(file);
+        }
+    }
+
+    if let Some(directories) = content_to_copy.directories {
+        for directory in directories {
+            let filter = doc!{
+                "$or": [
+                    { FIELD_PATH_CUUIDS_0: {"$in": &directory.directories }, FIELD_NODE_TYPE: TypeNode::Repertoire.to_str() },  // Files
+                    { FIELD_TUUID: { "$in": &directory.directories } },         // Directory entries
+                ],
+                "user_id": &user_id_source
+            };
+            let (file_list, _) = get_complete_files(mongo, filter, None, None, None).await?;
+            for mut file in file_list.fichiers {
+                file.version_courante = None;  // Not keeping this, only fuuids_versions is needed to link back
+                transaction_value.entries.push(file);
+            }
+        }
+    }
+
+    transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_COPY_V3,
+        serde_json::to_value(&transaction_value)?,
+        Some(&mut session)
+    ).await?;
+
+    session.commit_transaction().await?;
+
+    // Emit events on destination directory
+    let evenement_contenu = CollectionEventAggregator::new(command.cuuid.as_str())
+        .fichiers_ajoutes(command.inclure_tuuids.clone());
+    delayed_event_emitter_service.emit(evenement_contenu).await?;
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }
 
 async fn file_summary<M>(
@@ -1338,7 +1458,7 @@ async fn recycle_items<M>(
     let fuuids: Vec<String> = file_tuuids_by_fuuid.keys().into_iter().map(|k| k.to_string()).collect();
     claim_files_by_fuuids(outbound, &fuuids).await?;
     drop(fuuids);
-    claim_files_under_cuuids(mongo, outbound, &user_id, &directory_tuuids).await?;
+    claim_files_under_deleted_cuuids(mongo, outbound, &user_id, &directory_tuuids).await?;
 
     let type_node_fichier: &str = TypeNode::Fichier.into();
     let type_node_directory: &str = TypeNode::Repertoire.into();
