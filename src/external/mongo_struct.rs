@@ -251,6 +251,9 @@ pub struct RowPartagesUsager {
 #[derive(Serialize, Deserialize)]
 pub struct StreamTokenRow {
     pub token: String,
+    /// Main file
+    pub fuuid: String,
+    /// Allowed fuuids (e.g. images, videos, subtitles)
     pub fuuids: Vec<String>,
     #[serde(with="FromChrono04DateTime")]
     pub expiration: DateTime<Utc>,

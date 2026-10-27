@@ -250,37 +250,48 @@ async fn job_get_key<M>(
     match job {
         Some(inner) => {
             // Job exists. Request key from MaitreDesCles, redirect to requestor.
-            let cle_id = inner.cle_id;
-            let request = RequeteDechiffrage {
-                domaine: DOMAIN_NAME.to_string(),
-                liste_hachage_bytes: None,
-                cle_ids: Some(vec![cle_id]),
-                certificat_rechiffrage: Some(wrapper.certificate.chaine_pem()?),
-                inclure_signature: None,
-            };
-
-            // Extract reply information, keymaster will reply directly
-            let reply_properties = &wrapper.delivery_info.properties;
-            let (reply_to, correlation_id) = match (reply_properties.reply_to(), reply_properties.correlation_id()) {
-                (Some(reply_to), Some(correlation_id)) => (reply_to.to_string(), correlation_id.to_string()),
-                _ => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Missing reply information")).await
-            };
-
-            let routing = RoutageMessageAction::builder(
-                DOMAINE_NOM_MAITREDESCLES,
-                MAITREDESCLES_REQUETE_DECHIFFRAGE_V2,
-                vec![Securite::L3Protege]
-            )
-                .reply_to(reply_to)
-                .correlation_id(correlation_id)
-                .blocking(false)
-                .build();
-
-            // The response is handled by KeyMaster. Emit a request (do not wait for response)
-            let value = serde_json::to_value(request)?;
-            let (response, _id) = format.build_action_message(
-                MessageKind::Requete, &routing, value)?;
-            messaging.emit(response, Some(routing)).await?;
+            if let Err(e) = allow_key_decryption(
+                messaging,
+                format,
+                vec![inner.cle_id],
+                wrapper.delivery_info.clone(),
+                wrapper.certificate.as_ref()
+            ).await {
+                error!("Error sending keymaster relay request: {:?}", e);
+                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Error processing request")).await
+            }
+            
+            // let cle_id = inner.cle_id;
+            // let request = RequeteDechiffrage {
+            //     domaine: DOMAIN_NAME.to_string(),
+            //     liste_hachage_bytes: None,
+            //     cle_ids: Some(vec![cle_id]),
+            //     certificat_rechiffrage: Some(wrapper.certificate.chaine_pem()?),
+            //     inclure_signature: None,
+            // };
+            //
+            // // Extract reply information, keymaster will reply directly
+            // let reply_properties = &wrapper.delivery_info.properties;
+            // let (reply_to, correlation_id) = match (reply_properties.reply_to(), reply_properties.correlation_id()) {
+            //     (Some(reply_to), Some(correlation_id)) => (reply_to.to_string(), correlation_id.to_string()),
+            //     _ => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Missing reply information")).await
+            // };
+            //
+            // let routing = RoutageMessageAction::builder(
+            //     DOMAINE_NOM_MAITREDESCLES,
+            //     MAITREDESCLES_REQUETE_DECHIFFRAGE_V2,
+            //     vec![Securite::L3Protege]
+            // )
+            //     .reply_to(reply_to)
+            //     .correlation_id(correlation_id)
+            //     .blocking(false)
+            //     .build();
+            //
+            // // The response is handled by KeyMaster. Emit a request (do not wait for response)
+            // let value = serde_json::to_value(request)?;
+            // let (response, _id) = format.build_action_message(
+            //     MessageKind::Requete, &routing, value)?;
+            // messaging.emit(response, Some(routing)).await?;
 
             Ok(())
         },
@@ -506,6 +517,9 @@ struct CommandCreateFileAccessToken {
 }
 
 use millegrilles_common_rust::base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64_url_nopad, Engine as _};
+use millegrilles_common_rust::millegrilles_cryptographie::x509::EnveloppeCertificat;
+use millegrilles_common_rust::v3::impls::rabbitmq_consumer::DeliveryInfo;
+use crate::flow::keys::allow_key_decryption;
 
 #[derive(Serialize)]
 struct ResponseCreateStreamToken {
@@ -567,6 +581,7 @@ async fn create_stream_token<M>(
     let encoded_secret = base64_url_nopad.encode(&secret.0)[0..24].to_string();
     let token_row = StreamTokenRow {
         token: encoded_secret,
+        fuuid,
         fuuids,
         expiration,
         tuuid: command.tuuid,

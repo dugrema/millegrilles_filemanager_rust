@@ -4,7 +4,7 @@ use crate::external::mq::*;
 use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
 use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_directory_statistics, get_shared_tuuid, ResultatStatistiquesRow};
 use crate::flow::file_jobs::BackgroundJob;
-use crate::flow::keys::{convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2};
+use crate::flow::keys::{allow_key_decryption, convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2};
 use crate::flow::media::get_information_fichier_stream;
 use crate::flow::request_models::*;
 use millegrilles_common_rust::bson::doc;
@@ -17,7 +17,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::Mess
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
-use millegrilles_common_rust::v3::ConfigService;
+use millegrilles_common_rust::v3::{ConfigService, FormatService, MessagingService};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
@@ -25,11 +25,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::bson;
 use millegrilles_common_rust::generateur_messages::{RoutageMessageAction, RoutingValidation};
-use crate::external::mongo_struct::{ContactRow, RowPartagesUsager};
+use crate::external::mongo_struct::{ContactRow, NodeFichierVersionOwned, RowPartagesUsager, StreamTokenRow};
 use crate::flow::sharing::{get_contacts_user, map_user_ids_nom_usager};
 
 pub async fn process_request<M>(
-    config: &dyn ConfigService,
+    messaging: &dyn MessagingService,
+    format: &dyn FormatService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated,
@@ -48,13 +49,14 @@ pub async fn process_request<M>(
                 REQUETE_INFO_STATISTIQUES => request_statistics_info(mongo, outbound, wrapper).await,
                 REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
                 REQUETE_JOBS_VIDEO => request_video_conversion_job(mongo, outbound, wrapper).await,
-                REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
                 REQUETE_PARTAGES_USAGER => user_shared_collections(mongo, outbound, wrapper).await,
                 REQUETE_CHARGER_CONTACTS => user_shared_contacts(mongo, outbound, wrapper).await,
                 REQUETE_PARTAGES_CONTACT => user_shared_collections_contacts(mongo, outbound, wrapper).await,
                 REQUETE_SEARCH_INDEX_V2 => search_index(mongo, outbound, wrapper).await,
+                REQUETE_GET_CLES_STREAM => get_streaming_keys(messaging, format, mongo, outbound, wrapper).await,
 
                 // Obsolete?
+                REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
                 REQUETE_DOCUMENTS_PAR_TUUID => obsolete(outbound, wrapper).await,
                 REQUETE_GET_CLES_FICHIERS => obsolete(outbound, wrapper).await,
                 REQUETE_VERIFIER_ACCES_FUUIDS => obsolete(outbound, wrapper).await,
@@ -873,4 +875,79 @@ async fn search_index<M>(
     }
 
     outbound.respond(wrapper.delivery_info, response).await
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParametresGetClesStream {
+    /// Secret token (new)
+    pub token: Option<String>,
+    /// Requested keys
+    pub fuuids: Vec<String>,
+    /// Old JWT token
+    pub jwt: Option<String>,
+    pub user_id: Option<String>,
+}
+
+async fn get_streaming_keys<M>(
+    messaging: &dyn MessagingService,
+    format: &dyn FormatService,
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    debug!("user_shared_collections");
+    let request: ParametresGetClesStream = wrapper.message.deserialize()?;
+
+    if ! wrapper.certificate.verifier_roles(vec![RolesCertificats::Stream])? {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    let token = match request.token {
+        Some(token) => token,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(410, "Must use new token")).await
+    };
+
+    let collection_tokens = mongo.get_collection_typed::<StreamTokenRow>(NOM_COLLECTION_STREAM_TOKENS)?;
+    let filter = doc! { FIELD_TOKEN: &token };
+    let token_info = match collection_tokens.find_one(filter).await? {
+        Some(token_info) => token_info,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    };
+
+    let mut allowed_fuuids_set = HashSet::new();
+    allowed_fuuids_set.extend(token_info.fuuids);
+    let mut requested_fuuids = HashSet::new();
+    requested_fuuids.extend(request.fuuids.clone());
+
+    if ! allowed_fuuids_set.is_superset(&requested_fuuids) {
+        debug!("At least one requested fuuid is not allowed for token {}: {:?}", token, requested_fuuids);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    }
+
+    let filter_fuuids = doc! { FIELD_FUUID: &token_info.fuuid };
+    let collection_versions = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let version = match collection_versions.find_one(filter_fuuids).await? {
+        Some(version) => version,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+
+    let key_id = match version.cle_id {
+        Some(key_id) => key_id,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Decryption key for file not found")).await
+    };
+
+    if let Err(e) = allow_key_decryption(
+        messaging,
+        format,
+        vec![key_id],
+        wrapper.delivery_info.clone(),
+        wrapper.certificate.as_ref()
+    ).await {
+        error!("Error sending keymaster relay request: {:?}", e);
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Error processing request")).await
+    }
+
+    // No response needed, the keymaster will respond directly to the requestor
+    Ok(())
 }

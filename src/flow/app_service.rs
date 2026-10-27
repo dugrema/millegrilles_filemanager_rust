@@ -170,7 +170,8 @@ impl ApplicationService {
                 Ok(message) => {
                     let routing = message.message.routage.clone();
                     if let Err(e) = process_request(
-                        self.config.as_ref(),
+                        self.messaging.as_ref(),
+                        self.format.as_ref(),
                         self.mongo.as_ref(),
                         self.outbound.as_ref(),
                         message
