@@ -1229,7 +1229,7 @@ async fn copy_files_collections<M>(
     let mut batch_counter = 1;
     let mut transaction_value = TransactionCopyV3 {
         command: command_copy.clone(),
-        entries: vec![],
+        entries: Vec::with_capacity(COPY_FILE_BATCH_SIZE),
         destination: destination_path_cuuid.clone(),
         user_id: user_id.clone(),
         include_deleted,
