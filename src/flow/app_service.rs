@@ -28,7 +28,6 @@ use crate::flow::file_events::DelayedEventEmitterService;
 
 /// Handles queue consumer threads, calls individual routing methods
 pub struct ApplicationService {
-    pki: Arc<dyn PkiService>,
     config: Arc<dyn ConfigService>,
     format: Arc<dyn FormatService>,
     chiffrage: Arc<dyn ChiffrageService>,
@@ -37,13 +36,11 @@ pub struct ApplicationService {
     transaction: Arc<FileManagerTransactionService>,
     mongo: Arc<MongoDaoImpl>,
     backup: Arc<dyn BackupService>,
-    document_encryption: Arc<DocumentEncryptionServiceImpl>,
     event_emitter_service: Arc<DelayedEventEmitterService>,
 }
 
 impl ApplicationService {
     pub fn new(
-        pki: Arc<dyn PkiService>,
         config: Arc<dyn ConfigService>,
         format: Arc<dyn FormatService>,
         chiffrage: Arc<dyn ChiffrageService>,
@@ -52,11 +49,9 @@ impl ApplicationService {
         transaction: Arc<FileManagerTransactionService>,
         mongo: Arc<MongoDaoImpl>,
         backup: Arc<dyn BackupService>,
-        document_encryption: Arc<DocumentEncryptionServiceImpl>,
         event_emitter_service: Arc<DelayedEventEmitterService>,
     ) -> Self {
         Self {
-            pki,
             config,
             format,
             chiffrage,
@@ -65,7 +60,6 @@ impl ApplicationService {
             transaction,
             mongo,
             backup,
-            document_encryption,
             event_emitter_service,
         }
     }
@@ -233,7 +227,6 @@ impl ApplicationService {
                         self.messaging.as_ref(),
                         self.outbound.as_ref(),
                         self.event_emitter_service.as_ref(),
-                        self.document_encryption.as_ref(),
                         self.transaction.as_ref(),
                         message
                     ).await {

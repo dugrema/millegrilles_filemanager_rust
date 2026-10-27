@@ -66,11 +66,16 @@ impl AppContext {
 
         let filehost = Arc::new(FilehostServiceImpl::new(config.clone(), format.clone(), outbound.clone()));
 
-        let document_encryption = Arc::new(DocumentEncryptionServiceImpl::new(security.clone(), outbound.clone(), DOMAIN_NAME));
+        // let document_encryption = Arc::new(DocumentEncryptionServiceImpl::new(security.clone(), outbound.clone(), DOMAIN_NAME));
 
         // List data tables (excluding redolog and tracking). They get truncated on restore (when not resuming).
         let data_tables = vec![
-            // TODO COLLECTION_NAME_ACCOUNTS.to_string(),
+            NOM_COLLECTION_FICHIERS_REP.to_string(),
+            NOM_COLLECTION_VERSIONS.to_string(),
+            NOM_COLLECTION_MEDIA.to_string(),
+            NOM_COLLECTION_FILE_COMMENTS.to_string(),
+            NOM_COLLECTION_PARTAGE_CONTACT.to_string(),
+            NOM_COLLECTION_PARTAGE_COLLECTIONS.to_string(),
         ];
         let backup = Arc::new(DomainBackupServiceImpl::new(
             config.clone(),
@@ -90,7 +95,6 @@ impl AppContext {
         ));
 
         let app_service = Arc::new(ApplicationService::new(
-            security.clone(),
             config.clone(),
             format.clone(),
             security.clone(),
@@ -99,7 +103,6 @@ impl AppContext {
             transaction.clone(),
             mongo.clone(),
             backup.clone(),
-            document_encryption.clone(),
             event_emitter_service.clone(),
         ));
 

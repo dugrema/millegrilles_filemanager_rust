@@ -45,7 +45,6 @@ pub async fn process_request<M>(
             match action {
                 REQUEST_SYNC_DIRECTORY => request_sync_directory(mongo, outbound, wrapper).await,
                 REQUETE_INFO_STATISTIQUES => request_statistics_info(mongo, outbound, wrapper).await,
-                REQUETE_DOCUMENTS_PAR_TUUID => request_documents_by_tuuid(mongo, outbound, wrapper).await,
                 REQUEST_FILES_BY_TUUID => request_files_by_tuuid(mongo, outbound, wrapper).await,
                 REQUETE_JOBS_VIDEO => request_video_conversion_job(mongo, outbound, wrapper).await,
                 REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
@@ -55,6 +54,7 @@ pub async fn process_request<M>(
                 REQUETE_SEARCH_INDEX_V2 => search_index(mongo, outbound, wrapper).await,
 
                 // Obsolete?
+                REQUETE_DOCUMENTS_PAR_TUUID => obsolete(outbound, wrapper).await,
                 REQUETE_GET_CLES_FICHIERS => obsolete(outbound, wrapper).await,
                 REQUETE_VERIFIER_ACCES_FUUIDS => obsolete(outbound, wrapper).await,
                 REQUETE_VERIFIER_ACCES_TUUIDS => obsolete(outbound, wrapper).await,
@@ -265,30 +265,6 @@ async fn request_statistics_info<M>(
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
     debug!("request_statistics_info");
-
-    todo!();
-
-    Ok(())
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RequeteDocumentsParTuuids {
-    tuuids_documents: Vec<String>,
-    partage: Option<bool>,       // Flag qui indique qu'on utilise une permission (contact partage)
-    contact_id: Option<String>,  // Identificateur de contact direct
-}
-
-#[derive(Clone, Serialize)]
-struct ReponseDocumentsParTuuid {
-    fichiers: Vec<ResponseFichierRepVersion>
-}
-
-async fn request_documents_by_tuuid<M>(
-    mongo: &M,
-    outbound: &MessageOutboundFacade,
-    wrapper: MessageValidated
-) -> Result<(), CommonError> where M: MongoDaoTyped {
-    debug!("Requesting documents by tuuid");
 
     todo!();
 

@@ -23,7 +23,6 @@ use millegrilles_common_rust::v3::{ConfigService, FormatService, TransactionRout
 use millegrilles_common_rust::bson;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use crate::flow::file_jobs::set_flag_image_traitee;
 
 pub struct FileManagerTransactionService {
     pub transaction: Arc<dyn TransactionService>,
