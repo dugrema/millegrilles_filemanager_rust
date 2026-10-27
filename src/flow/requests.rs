@@ -22,8 +22,8 @@ use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use crate::external::mongo_struct::RowPartagesUsager;
+use std::collections::{HashMap, HashSet};
+use crate::external::mongo_struct::{ContactRow, RowPartagesUsager};
 use crate::flow::sharing::{get_contacts_user, map_user_ids_nom_usager};
 
 pub async fn process_request<M>(
@@ -50,7 +50,7 @@ pub async fn process_request<M>(
                 REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
                 REQUETE_PARTAGES_USAGER => user_shared_collections(mongo, outbound, wrapper).await,
                 REQUETE_CHARGER_CONTACTS => user_shared_contacts(mongo, outbound, wrapper).await,
-                REQUETE_PARTAGES_CONTACT => todo!(),
+                REQUETE_PARTAGES_CONTACT => user_shared_collections_contacts(mongo, outbound, wrapper).await,
                 REQUETE_SEARCH_INDEX_V2 => todo!(),
 
                 // Obsolete?
@@ -559,8 +559,24 @@ async fn user_shared_collections<M>(
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct RequetePartagesContact {
-    // user_id: Option<String>
+    user_id: Option<String>
+}
+
+#[derive(Serialize)]
+struct ReponseContact {
+    #[serde(rename(deserialize = "contactId"))]
+    contact_id: String,
+    #[serde(rename(deserialize = "userId"))]
+    user_id: String,
+    #[serde(rename(deserialize = "nomUsager"))]
+    nom_usager: String,
+}
+
+#[derive(Serialize)]
+struct ReponseContacts {
+    contacts: Vec<ReponseContact>,
 }
 
 async fn user_shared_contacts<M>(
@@ -570,7 +586,59 @@ async fn user_shared_contacts<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     debug!("user_shared_collections");
-    let request: RequetePartagesContact = wrapper.message.deserialize()?;
+    let _request: RequetePartagesContact = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
+
+    let mut user_ids = HashMap::new();
+    let filtre = doc! { CHAMP_USER_ID: &user_id };
+    let collection = mongo.get_collection_typed::<ContactRow>(NOM_COLLECTION_PARTAGE_CONTACT)?;
+    let mut curseur = collection.find(filtre).await?;
+    while let Some(row) = curseur.next().await {
+        let row = row?;
+        user_ids.insert(row.contact_user_id.clone(), row);
+    }
+
+    // Faire une requete aupres de MaitreDesComptes pour mapper le user_id avec le nom_usager courant
+    let vec_user_ids: Vec<&str> = user_ids.keys().map(|u|u.as_str()).collect();
+    let reponse_usagers = map_user_ids_nom_usager(outbound, &vec_user_ids).await?;
+
+    // Mapper contact_id et nom_usager
+    let mut contacts = Vec::new();
+    for usager in reponse_usagers {
+        let contact_id = match user_ids.remove(usager.user_id.as_str()) {
+            Some(inner) => {
+                inner.contact_id
+            },
+            None => {
+                debug!("Mismatch user_id {}, SKIP", usager.user_id);
+                continue;
+            }
+        };
+        let contact = ReponseContact {
+            contact_id,
+            user_id: usager.user_id,
+            nom_usager: usager.nom_usager,
+        };
+        contacts.push(contact);
+    }
+
+    let response = ReponseContacts { contacts };
+
+    outbound.respond(wrapper.delivery_info, response).await
+}
+
+
+async fn user_shared_collections_contacts<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    debug!("user_shared_collections");
+    let _request: RequetePartagesContact = wrapper.message.deserialize()?;
     let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
         Ok(user_id) => user_id,
         Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
@@ -581,18 +649,14 @@ async fn user_shared_contacts<M>(
 
     // Faire une requete pour obtenir tous les partages associes aux contacts
     let contact_ids: Vec<&str> = contacts.iter().map(|c| c.contact_id.as_str()).collect();
-    let filtre = doc! {
-        CHAMP_CONTACT_ID: { "$in": contact_ids },
-    };
+    let filtre = doc! { CHAMP_CONTACT_ID: { "$in": contact_ids } };
     let collection = mongo.get_collection_typed::<RowPartagesUsager>(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
     let mut curseur = collection.find(filtre).await?;
-    let partages = {
-        let mut partages = Vec::new();
-        while let Some(row) = curseur.next().await {
-            partages.push(row?);
-        }
-        partages
-    };
+
+    let mut partages = Vec::new();
+    while let Some(row) = curseur.next().await {
+        partages.push(row?);
+    }
 
     // Faire une requete pour obtenir l'information des usagers. Dedupe avec HashSet
     let mut user_ids = HashSet::new();
