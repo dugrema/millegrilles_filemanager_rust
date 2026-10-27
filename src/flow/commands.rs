@@ -1,6 +1,6 @@
 use crate::constants::*;
 use crate::external::mongo::*;
-use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
+use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned, StreamTokenRow};
 use crate::external::mq::*;
 use crate::flow::file_events::{claim_all_files, receive_visits};
 use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, RequestLeaseForBatchOperation, RequestReturnFichiersrepLease, get_batch_of_fichiersrep_leases, get_batch_of_fichiersversion_leases, lease_batch_fichiersrep, reset_indexation, return_fichiersrep_lease, sauvegarder_job_video};
@@ -23,6 +23,9 @@ use millegrilles_common_rust::v3::{FormatService, MessagingService};
 use millegrilles_common_rust::{serde_json, tokio};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::CleSecreteMgs4;
+use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_mgs4::CleSecreteCipher::CleSecrete;
+use crate::flow::access::{verify_user_access_tuuids, verify_user_certificate};
 
 pub async fn process_command(
     format: &dyn FormatService,
@@ -48,6 +51,7 @@ pub async fn process_command(
                 COMMANDE_REINDEXER => reindex_files(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_VISITS => command_visits(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
+                COMMAND_CREATE_STREAM_TOKEN => create_stream_token(mongo.as_ref(), outbound.as_ref(), wrapper).await,
 
                 // Obsolete - keeping to log applications that need to be fixed
                 COMMANDE_RECLAMER_FUUIDS => obsolete(outbound.as_ref(), wrapper).await,
@@ -492,4 +496,90 @@ async fn command_visits<M>(
             outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await
         },
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CommandCreateFileAccessToken {
+    tuuid: String,
+    contact_id: Option<String>,
+    duration_secs: Option<i64>,
+}
+
+use millegrilles_common_rust::base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64_url_nopad, Engine as _};
+
+#[derive(Serialize)]
+struct ResponseCreateStreamToken {
+    ok: bool,
+    token: String,
+}
+
+async fn create_stream_token<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let command: CommandCreateFileAccessToken = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
+    };
+
+    let effective_user_id = match command.contact_id {
+        Some(contact_id) => {
+            todo!("share")
+        },
+        None => user_id.clone()
+    };
+
+    let filter_file_rep = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &effective_user_id };
+    let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let file_rep_row = match collection.find_one(filter_file_rep).await? {
+        Some(file_rep_row) => file_rep_row,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+
+    let fuuid = match file_rep_row.fuuids_versions {
+        Some(fuuids_versions) => match fuuids_versions.get(0) {
+            Some(fuuid) => fuuid.clone(),
+            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+        },
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+
+    let filter_file_rep = doc!{ FIELD_FUUID: &fuuid };
+    let collection = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let version = match collection.find_one(filter_file_rep).await? {
+        Some(version) => version,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "File not found")).await
+    };
+
+    // Give access to all matching files, this includes original, images, videos, subtitles, etc.
+    let fuuids = version.fuuids_reclames;
+
+    let duration = match command.duration_secs {
+        Some(duration_secs) => Duration::seconds(duration_secs),
+        None => Duration::days(1),
+    };
+    let expiration = Utc::now() + duration;
+
+    // Create a 24 char secret code (token) in url safe fashion
+    let secret = CleSecreteMgs4::generer();
+    let encoded_secret = base64_url_nopad.encode(&secret.0)[0..24].to_string();
+    let token_row = StreamTokenRow {
+        token: encoded_secret,
+        fuuids,
+        expiration,
+        tuuid: command.tuuid,
+        user_id,
+        contact_id: command.contact_id,
+    };
+
+    let collection_tokens = mongo.get_collection_typed::<StreamTokenRow>(NOM_COLLECTION_STREAM_TOKENS)?;
+    collection_tokens.insert_one(&token_row).await?;
+
+    let response = ResponseCreateStreamToken {
+        ok: true,
+        token: token_row.token,
+    };
+    outbound.respond_encrypted(wrapper.delivery_info, response, wrapper.certificate.as_ref()).await
 }

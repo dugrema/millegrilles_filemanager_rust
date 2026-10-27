@@ -17,6 +17,7 @@ pub const NOM_COLLECTION_TEMP_VISITS: &str = "FileManager/temp/visits";
 pub const NOM_COLLECTION_JOBS_LEASES: &str = "FileManager/jobs/leases";
 pub const NOM_COLLECTION_JOBS_VERSIONS_LEASES: &str = "FileManager/jobs/versionsLeases";
 pub const NOM_COLLECTION_FILE_COMMENTS: &str = "FileManager/fileComments";
+pub const NOM_COLLECTION_STREAM_TOKENS: &str = "FileManager/streamTokens";
 
 
 pub const INDEX_REDO_LOG_ID: &str = "redo_log_id";

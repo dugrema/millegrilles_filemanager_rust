@@ -247,3 +247,14 @@ pub struct RowPartagesUsager {
     pub user_id: String,
     pub contact_id: String,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct StreamTokenRow {
+    pub token: String,
+    pub fuuids: Vec<String>,
+    #[serde(with="FromChrono04DateTime")]
+    pub expiration: DateTime<Utc>,
+    pub tuuid: String,
+    pub user_id: String,
+    pub contact_id: Option<String>,
+}

@@ -92,6 +92,7 @@ pub const COMMANDE_GET_CLE_JOB_CONVERSION: &str = "getCleJobConversion";
 // const COMMANDE_REINDEXER: &str = "";
 pub const COMMAND_VISITS: &str = "visits";
 pub const COMMAND_CLAIM_ALL_FILES: &str = "claimAllFiles";
+pub const COMMAND_CREATE_STREAM_TOKEN: &str = "createStreamToken";
 // pub const COMMANDE_INDEXATION_GET_JOB: &str = "getJobIndexation";
 pub const COMMANDE_RECLAMER_FUUIDS: &str = "reclamerFuuids";  // Really sync with filehosts
 pub const COMMAND_LEASE_FOR_IMAGE: &str = "leaseForImage";
