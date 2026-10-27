@@ -20,7 +20,7 @@ use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
-use millegrilles_common_rust::serde_json;
+use millegrilles_common_rust::{hex, serde_json};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
@@ -1127,6 +1127,12 @@ async fn copy_files_collections<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped
 {
     let command: TransactionAjouterFichiersCollection = wrapper.message.deserialize()?;
+
+    // Validation of command
+    if command.inclure_tuuids.contains(&command.cuuid) {
+        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Cannot copy a directory on itself")).await
+    }
+
     let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
         Ok(user_id) => user_id,
         Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
@@ -1138,60 +1144,79 @@ async fn copy_files_collections<M>(
         None => user_id.clone()
     };
 
+    // The message.id will be used to create new tuuids, using the first 56 hex chars and padding
+    // with 8 more using a counter for uniqueness.
+    let tuuid_prefix = wrapper.message.id.as_str()[0..56].to_string();
+    let mut tuuid_counter: u32 = 0;
+
+    let mut file_tuuids: Vec<String> = Vec::with_capacity(command.inclure_tuuids.len());
+    // Make list of all directories, create new hierarchy with updated cuuids. Map by old cuuid.
+    // Key is old cuuid, value is new generated cuuid for this entry
+    let mut map_new_by_old_cuuid: HashMap<String, String> = HashMap::with_capacity(100);
+
+    let collection_filereps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+
+    // Get destination information
+    let filter_destination = doc! { FIELD_TUUID: &command.cuuid, FIELD_USER_ID: &user_id };
+    let destination_filerep = match collection_filereps.find_one(filter_destination).await? {
+        Some(inner) => inner,
+        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Destination directory not found")).await
+    };
+    // Create the new destination path that includes the tuuid destination directory.
+    let destination_path_cuuid = match destination_filerep.path_cuuids {
+        Some(mut cuuids) => {
+            cuuids.insert(0, destination_filerep.tuuid.clone());
+            cuuids
+        },
+        None => vec![destination_filerep.tuuid.clone()]
+    };
+
+    let filter_request = doc! {
+        FIELD_TUUID: { "$in": &command.inclure_tuuids },
+        FIELD_USER_ID: &user_id_source
+    };
+    let mut cursor = collection_filereps.find(filter_request).await?;
+    while let Some(row) = cursor.next().await {
+        let file_rep = row?;
+        let node_type: TypeNode = file_rep.type_node.as_str().try_into()?;
+        match node_type {
+            TypeNode::Fichier => file_tuuids.push(file_rep.tuuid),
+            TypeNode::Collection | TypeNode::Repertoire => {
+                // Generate a new tuuid for this directory
+                let new_tuuid = format!("{}{:08x}", tuuid_prefix, tuuid_counter);
+                tuuid_counter += 1;
+                map_new_by_old_cuuid.insert(file_rep.tuuid, new_tuuid);
+            }
+        }
+    }
+
+    // Further query to get all subdirectories
+    let top_level_directories: Vec<&String> = map_new_by_old_cuuid.keys().collect();
+    debug!("Top level directories: {:?}", top_level_directories);
+    let filter_request = doc! {
+        FIELD_PATH_CUUIDS: { "$in": top_level_directories },
+        FIELD_USER_ID: &user_id_source,
+        FIELD_NODE_TYPE: TypeNode::Repertoire.to_str(),
+    };
+    let mut cursor = collection_filereps.find(filter_request).await?;
+    while let Some(row) = cursor.next().await {
+        let file_rep = row?;
+        let node_type: TypeNode = file_rep.type_node.as_str().try_into()?;
+        match node_type {
+            TypeNode::Repertoire => {
+                // Generate a new tuuid for this directory
+                let new_tuuid = format!("{}{:08x}", tuuid_prefix, tuuid_counter);
+                tuuid_counter += 1;
+                map_new_by_old_cuuid.insert(file_rep.tuuid, new_tuuid);
+            },
+            _ => return Err(CommonError::Str("Wrong type of entry (should be TypeNode::Repertoire)")),
+        }
+    }
+    debug!("All directories mapped: {:?}", map_new_by_old_cuuid.keys());
+
     let mut session = mongo.get_session().await?;
     session.start_transaction().await?;
 
-    // Verify user acces to files
-    if ! verify_user_access_tuuids(mongo, user_id_source.as_str(), &command.inclure_tuuids).await? {
-        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
-    }
-    let content_to_copy = parse_selection_directories(
-        mongo,
-        user_id_source.as_str(),
-        command.cuuid.as_str(),
-        &command.inclure_tuuids,
-        false,
-        include_deleted,
-        &mut session,
-    ).await?;
-    session.commit_transaction().await?;  // No need to keep locks
-
-    // Check for cycles (ensure the destination is not under the source (moving under itself breaks the graph)
-    if let Some(directory_moves) = content_to_copy.directories.as_ref() {
-        for directory_move in directory_moves {
-            for directory in &directory_move.directories {
-                if content_to_copy.destination_path.contains(directory) {
-                    debug!("copy_files_collections Rejecting copy directory, the destination is under the source (this breaks the graph)");
-                    return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(400, "Cannot copy a directory under itself")).await
-                }
-            }
-        }
-    }
-
-    if include_deleted {
-        // This is a copy out of the recycling bin - the files will be extracted and marked as not deleted
-        // Fails when at least one file has already been permanently deleted.
-        if let Some(files) = content_to_copy.files.as_ref() {
-            if let Err(e) = claim_files_by_deleted_tuuids(mongo, outbound, user_id.as_str(), files).await {
-                info!("claim_files_by_deleted_tuuids File already deleted : {:?}", e);
-                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "At least one file has already been permanently deleted")).await
-            }
-        }
-
-        if let Some(directory_moves) = content_to_copy.directories.as_ref() {
-            // Check that all files to copy still exist;
-            let mut cuuids = Vec::new();
-            for directory in directory_moves {
-                cuuids.extend(directory.directories.clone());
-            }
-            if let Err(e) = claim_files_under_deleted_cuuids(mongo, outbound, &user_id, &cuuids).await {
-                info!("claim_files_by_deleted_tuuids File under directory already deleted : {:?}", e);
-                return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "At least one file has already been permanently deleted")).await
-            }
-        }
-    }
-
-    session.start_transaction().await?;
     let mut command_copy = wrapper.message.clone();
     command_copy.certificat = None;  // Remove certificate, keeping a copy for reference
 
@@ -1199,45 +1224,104 @@ async fn copy_files_collections<M>(
     let mut transaction_value = TransactionCopyV3 {
         command: command_copy.clone(),
         entries: vec![],
-        destination: content_to_copy.destination_path.clone(),
+        destination: destination_path_cuuid.clone(),
         user_id: user_id.clone(),
         include_deleted,
         batch_no: Some(batch_counter),
     };
 
-    // Load files/directories and produce transactions.
-    // content_to_copy.files only includes files specifically selected by the user
-    // We need to go by directory to retrieve files and update their path.
-    if let Some(files) = content_to_copy.files {
-        let filter = doc!{ FIELD_TUUID: { "$in": &files }, "user_id": &user_id_source };
-        let (file_list, _) = get_complete_files(mongo, filter, None, None, None).await?;
-        for mut file in file_list.fichiers {
-            file.version_courante = None;  // Not keeping this, only fuuids_versions is needed to link back
-            transaction_value.entries.push(file);
-        }
+    // All impacted directories are listed with a new tuuid. Start processing the transaction by
+    // going through all directories listed in the map (keys) and applying their new tuuids/path_cuuids.
+    let mut map_new_path_by_old_cuuid: HashMap<String, Vec<String>> = HashMap::new();
+
+    let all_directories: Vec<&String> = map_new_by_old_cuuid.keys().collect();
+    let filter_directories = doc! {
+        FIELD_TUUID: { "$in": &all_directories },
+        FIELD_USER_ID: &user_id_source,
+    };
+    let directory_entries = get_complete_copy(mongo, filter_directories).await?;
+    for mut directory in directory_entries {
+        let old_tuuid = &directory.file_rep.tuuid;
+        let new_tuuid = match map_new_by_old_cuuid.get(old_tuuid) {
+            Some(tuuid) => tuuid,
+            None => return Err(CommonError::Str("Mapping error, directory missing"))
+        };
+
+        // Map the new path cuuids. Start replacing until a cuuid is not found, then append
+        // destination path.
+        let new_path_cuuids: Vec<String> = match directory.file_rep.path_cuuids {
+            Some(old_path_cuuids) => {
+                let mut new_path_cuuid = Vec::new();
+                for cuuid in old_path_cuuids {
+                    match map_new_by_old_cuuid.get(&cuuid) {
+                        Some(new_cuuid) => new_path_cuuid.push(new_cuuid.clone()),
+                        None => break  // We're getting out of the mapped area, break the graph here
+                    }
+                }
+
+                // Add destination path to remapped directories, this connects the new graph
+                new_path_cuuid.extend(destination_path_cuuid.clone());
+                new_path_cuuid
+            },
+            None => destination_path_cuuid.clone()
+        };
+
+        // Keep a copy of the path, will be used to map the files
+        map_new_path_by_old_cuuid.insert(old_tuuid.clone(), new_path_cuuids.clone());
+
+        // Update the information in the directory entry
+        directory.file_rep.tuuid = new_tuuid.to_string();
+        directory.file_rep.path_cuuids = Some(new_path_cuuids);
+
+        // Add to transaction entries
+        transaction_value.entries.push(directory);
     }
 
-    if let Some(directories) = content_to_copy.directories {
-        for directory in directories {
-            let filter = doc!{
-                "$or": [
-                    { FIELD_PATH_CUUIDS_0: {"$in": &directory.directories }, FIELD_NODE_TYPE: TypeNode::Repertoire.to_str() },  // Files
-                    { FIELD_TUUID: { "$in": &directory.directories } },         // Directory entries
-                ],
-                "user_id": &user_id_source
-            };
-            let (file_list, _) = get_complete_files(mongo, filter, None, None, None).await?;
-            for mut file in file_list.fichiers {
-                file.version_courante = None;  // Not keeping this, only fuuids_versions is needed to link back
-                transaction_value.entries.push(file);
-            }
+    // Map all files
+    let filter_files = doc! {
+        "$or": [
+            { FIELD_TUUID: { "$in": &file_tuuids } },
+            { FIELD_PATH_CUUIDS: { "$in": &all_directories } },
+        ],
+        FIELD_USER_ID: &user_id_source,
+        FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
+    };
+    let file_entries = get_complete_copy(mongo, filter_files).await?;
+    for mut file in file_entries {
+        let cuuid = match file.file_rep.path_cuuids.as_ref() {
+            Some(path_cuuids) => match path_cuuids.get(0) {
+                Some(cuuid) => cuuid,
+                None => return Err(CommonError::Str("File without a path_cuuid"))
+            },
+            None => return Err(CommonError::Str("File without a path_cuuid"))
+        };
+        let new_path = match map_new_path_by_old_cuuid.get(cuuid) {
+            Some(new_path) => new_path,
+            None => &destination_path_cuuid  // Root of destination
+        };
+
+        // Generate a new tuuid for this file
+        let new_tuuid = format!("{}{:08x}", tuuid_prefix, tuuid_counter);
+        tuuid_counter += 1;
+
+        // Update file
+        file.file_rep.tuuid = new_tuuid;
+        file.file_rep.path_cuuids = Some(new_path.to_owned());
+
+        if let Some(media) = file.media.as_mut() {
+            media.user_id = user_id.clone();  // Update user_id
         }
+
+        transaction_value.entries.push(file);
     }
+
+    let transaction_value = serde_json::to_value(&transaction_value)?;
+    debug!("New transaction:\n{}", transaction_value);
 
     transaction.process_value(
         DOMAIN_NAME,
         TRANSACTION_COPY_V3,
-        serde_json::to_value(&transaction_value)?,
+        transaction_value,
         Some(&mut session)
     ).await?;
 

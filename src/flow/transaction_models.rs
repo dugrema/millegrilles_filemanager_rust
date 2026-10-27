@@ -1,12 +1,20 @@
 use std::collections::HashMap;
+use millegrilles_common_rust::bson;
+use millegrilles_common_rust::bson::{doc, Document};
+use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionformatchiffragestr;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
-use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
+use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::{DechiffrageInterMillegrilleOwned, MessageMilleGrillesOwned};
+use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
+use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
+use millegrilles_common_rust::tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
-use crate::external::mongo_struct::{AudioDetail, ImageDetail, MediaWebSubtitleDetail, SubtitleDetail};
-use crate::flow::request_models::ResponseFichierRepVersion;
+use crate::external::mongo::*;
+use crate::external::mongo_struct::{AudioDetail, CompleteFileRow, FileComment, ImageDetail, MediaOwnedRow, MediaWebSubtitleDetail, NodeFichierRepOwned, NodeFichierVersionOwned, SubtitleDetail, VideoDetail};
+use crate::flow::request_models::{FileCommentResponse, ReponseDocumentsParTuuid, ResponseFichierRepVersion, ResponseVersionCourante};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionNouvelleCollection {
@@ -345,7 +353,7 @@ pub struct TransactionCopyV3 {
     pub command: MessageMilleGrillesOwned,
     /// Full entries to be copied in the database.
     /// version_courante is empty since this copy will link to an existing record source using fuuids_versions.
-    pub entries: Vec<ResponseFichierRepVersion>,
+    pub entries: Vec<CopiedFileRepEntry>,
     /// Top level destination for reference - this has already been set in all entries
     pub destination: Vec<String>,
     /// The destination user_id
@@ -355,4 +363,202 @@ pub struct TransactionCopyV3 {
     /// This transaction type can be large, batches are used to split the work.
     /// When present this refers to this transaction's position in the batch.
     pub batch_no: Option<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CopiedFileRepEntry {
+    /// Copy of the fichier_rep collection for this entry, with adjusted tuuid and path_cuuids.
+    pub file_rep: CopiedFileRepValue,
+    /// Media collection contents for this file
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub media: Option<CopiedMediaValue>,
+    /// Comments on this file
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub comments: Option<Vec<FileCommentResponse>>,
+    /// File decryption information (copy of what is in the versions collection)
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub decryption: Option<DechiffrageInterMillegrilleOwned>,
+    /// Encrypted file size - this is the only information in versions that cannot be derived.
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub encrypted_file_size: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CopiedFileRepValue {
+    pub tuuid: String,
+    pub user_id: String,
+    pub type_node: String,
+    pub metadata: DataChiffre,
+
+    // Champs pour type_node Fichier
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub mimetype: Option<String>,
+    /// Fuuids des versions en ordre (plus recent en dernier)
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub fuuids_versions: Option<Vec<String>>,
+
+    // Champs pour type_node Fichiers/Repertoires
+    /// Path des cuuids parents (inverse, parent immediat est index 0)
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub path_cuuids: Option<Vec<String>>,
+}
+
+impl From<NodeFichierRepOwned> for CopiedFileRepValue {
+    fn from(value: NodeFichierRepOwned) -> Self {
+        Self {
+            tuuid: value.tuuid,
+            user_id: value.user_id,
+            type_node: value.type_node,
+            metadata: value.metadata,
+            mimetype: value.mimetype,
+            fuuids_versions: value.fuuids_versions,
+            path_cuuids: value.path_cuuids,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CopiedMediaValue {
+    pub fuuid: String,
+    pub user_id: String,
+
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub duration: Option<f32>,
+    #[serde(rename="videoCodec", skip_serializing_if="Option::is_none")]
+    pub video_codec: Option<String>,
+    pub anime: bool,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub images: Option<HashMap<String, ImageDetail>>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub video: Option<HashMap<String, VideoDetail>>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub audio: Option<Vec<AudioDetail>>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub subtitles: Option<Vec<SubtitleDetail>>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub web_subtitles: Option<Vec<MediaWebSubtitleDetail>>,
+}
+
+pub async fn get_complete_copy<M>(
+    mongo: &M,
+    filter: Document,
+) -> Result<Vec<CopiedFileRepEntry>, CommonError> where M: MongoDaoTyped {
+    let mut pipeline = vec![doc!{"$match": filter}];
+
+    // Move all content under fichierrep doc for easier mapping to CompleteFileRow
+    pipeline.push(doc!{"$replaceRoot": {"newRoot": {"fichierrep": "$$ROOT"}}});
+
+    // Join version information
+    pipeline.push(doc!{"$lookup": {
+            "from": NOM_COLLECTION_VERSIONS,
+            "localField": "fichierrep.fuuids_versions.0",
+            "foreignField": FIELD_FUUID,
+            "as": "versions",
+        }}
+    );
+    pipeline.push(doc!{"$addFields": {
+        "tuuid": "$fichierrep.tuuid",   // Used for troubleshooting deserialization errors
+        "current_version": {"$arrayElemAt": ["$versions", 0]},
+    }});
+    pipeline.push(doc!{"$unset": "versions"});
+
+    // Join comments
+    pipeline.push(doc!{"$lookup": {
+            "from": NOM_COLLECTION_FILE_COMMENTS,
+            "localField": "fichierrep.tuuid",
+            "foreignField": FIELD_TUUID,
+            "as": "comments",
+        }}
+    );
+
+    // Add lookup to media content
+    pipeline.push(
+        doc!{"$lookup": {
+            "from": NOM_COLLECTION_MEDIA,
+            "localField": "fichierrep.fuuids_versions.0",
+            "foreignField": FIELD_FUUID,
+            "let": {"user_id": "$fichierrep.user_id"},  // Expose the outer user_id as inner variable $$user_id
+            "pipeline": [{"$match": {"$expr": {"$eq": ["$user_id", "$$user_id"]}}}],        // Second key
+            "as": "media_list",
+        }}
+    );
+    pipeline.push(doc!{"$addFields": {"media": {"$arrayElemAt": ["$media_list", 0]}}});
+    pipeline.push(doc!{"$unset": "media_list"});
+
+    debug!("get_complete_files Pipeline: {:?}", pipeline);
+
+    let mut response = Vec::with_capacity(1000);
+
+    let collection_fichierrep = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let mut cursor = collection_fichierrep.aggregate(pipeline).await?;
+    while cursor.advance().await? {
+        let row = cursor.deserialize_current()?;
+        let tuuid = row.get_str("tuuid").unwrap_or("UNKNOWN").to_string();
+        let row: CompleteFileRow = match bson::deserialize_from_document(row) {
+            Ok(inner) => inner,
+            Err(e) => {
+                warn!("get_complete_files Deserialization error on tuuid {}: {:?}", tuuid, e);
+                continue    // Skip this entry
+            }
+        };
+
+        let (fuuid, encrypted_file_size, decryption) = match row.current_version {
+            Some(version) => {
+                let format_str: &str = match version.format { Some(format) => format.into(), None => "" };
+                let decryption = DechiffrageInterMillegrilleOwned {
+                    cle_id: version.cle_id,
+                    cles: None,
+                    compression: None,
+                    format: format_str.to_string(),
+                    hachage: None,
+                    header: None,
+                    nonce: version.nonce.clone(),
+                    signature: None,
+                    verification: version.verification.clone(),
+                };
+                (Some(version.fuuid), Some(version.taille), Some(decryption))
+            },
+            None => (None, None, None)
+        };
+
+        let mut filerep_entry = CopiedFileRepEntry {
+            file_rep: row.fichierrep.into(),
+            media: None,
+            comments: None,
+            decryption,
+            encrypted_file_size,
+        };
+
+        if let Some(comments) = row.comments {
+            if ! comments.is_empty() {
+                let mapped_comments = comments.into_iter().map(|c| c.into()).collect();
+                filerep_entry.comments = Some(mapped_comments);
+            }
+        }
+
+        if let (Some(fuuid), Some(media)) = (fuuid, row.media) {
+            filerep_entry.media = Some(CopiedMediaValue {
+                fuuid,
+                user_id: filerep_entry.file_rep.user_id.clone(),
+                height: media.height,
+                width: media.height,
+                duration: media.duration,
+                video_codec: media.video_codec,
+                anime: media.anime,
+                images: media.images,
+                video: media.video,
+                audio: media.audio,
+                subtitles: media.subtitles,
+                web_subtitles: media.web_subtitles,
+            });
+        }
+
+        response.push(filerep_entry);
+    }
+
+    Ok(response)
 }

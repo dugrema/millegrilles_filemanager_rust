@@ -87,7 +87,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DELETE_V3 => delete_file_reps_v3(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_MOVE_V2 => move_files_collections(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_COPY_V2 => todo!(),
+            TRANSACTION_COPY_V3 => copy_files_collections(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
             TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
 
@@ -118,6 +118,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_RECYCLE_ITEMS_V3 => todo!("legacy"),
             TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!("legacy"),
             TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("legacy"),
+            TRANSACTION_COPY_V2 => todo!("legacy"),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
@@ -354,7 +355,7 @@ async fn new_file_version<M>(
             .update(ops)
             .build()
     );
-    aggregator.unordered = Some(vec![update_model_versions]);
+    aggregator.ordered = Some(vec![update_model_versions]);
 
     Ok(aggregator)
 }
@@ -869,7 +870,7 @@ async fn delete_video_job(
     };
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.unordered = Some(vec![
+    aggregator.ordered = Some(vec![
         WriteModel::UpdateMany(
             UpdateManyModel::builder()
                 .namespace(collection.namespace())
@@ -1553,7 +1554,7 @@ async fn share_remove_contact(
     );
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.unordered = Some(models);
+    aggregator.ordered = Some(models);
 
     Ok(aggregator)
 }
@@ -1602,7 +1603,7 @@ async fn share_add_collection(
     }
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.unordered = Some(models);
+    aggregator.ordered = Some(models);
 
     Ok(aggregator)
 }
@@ -1625,7 +1626,7 @@ async fn share_remove_collection(
     let collection = mongo.get_collection(NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.unordered = Some(vec![
+    aggregator.ordered = Some(vec![
         WriteModel::DeleteOne(
             DeleteOneModel::builder()
                 .namespace(collection.namespace())
@@ -1635,4 +1636,18 @@ async fn share_remove_collection(
     ]);
 
     Ok(aggregator)
+}
+
+async fn copy_files_collections(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: TransactionMoveV2 = wrapper.message.deserialize()?;
+
+    todo!();
+
+    // let mut aggregator = TransactionOperationAggregator::new();
+    // aggregator.ordered = Some(models);
+    //
+    // Ok(aggregator)
 }
