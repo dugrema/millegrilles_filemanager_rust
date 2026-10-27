@@ -1193,11 +1193,15 @@ async fn copy_files_collections<M>(
     // Further query to get all subdirectories
     let top_level_directories: Vec<&String> = map_new_by_old_cuuid.keys().collect();
     debug!("Top level directories: {:?}", top_level_directories);
-    let filter_request = doc! {
+    let mut filter_request = doc! {
         FIELD_PATH_CUUIDS: { "$in": top_level_directories },
         FIELD_USER_ID: &user_id_source,
         FIELD_NODE_TYPE: TypeNode::Repertoire.to_str(),
     };
+    if ! include_deleted {
+        filter_request.insert(FIELD_DELETED, false);
+    }
+
     let mut cursor = collection_filereps.find(filter_request).await?;
     while let Some(row) = cursor.next().await {
         let file_rep = row?;
@@ -1266,8 +1270,10 @@ async fn copy_files_collections<M>(
             None => destination_path_cuuid.clone()
         };
 
-        // Keep a copy of the path, will be used to map the files
-        map_new_path_by_old_cuuid.insert(old_tuuid.clone(), new_path_cuuids.clone());
+        // Keep a copy of the path, will be used to map the files. Insert the directory as first entry (to be used with files)
+        let mut new_mapped_path = vec![new_tuuid.clone()];
+        new_mapped_path.extend(new_path_cuuids.clone());
+        map_new_path_by_old_cuuid.insert(old_tuuid.clone(), new_mapped_path);
 
         // Update the information in the directory entry
         directory.file_rep.tuuid = new_tuuid.to_string();
@@ -1278,7 +1284,7 @@ async fn copy_files_collections<M>(
     }
 
     // Map all files
-    let filter_files = doc! {
+    let mut filter_files = doc! {
         "$or": [
             { FIELD_TUUID: { "$in": &file_tuuids } },
             { FIELD_PATH_CUUIDS: { "$in": &all_directories } },
@@ -1286,6 +1292,10 @@ async fn copy_files_collections<M>(
         FIELD_USER_ID: &user_id_source,
         FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
     };
+    if ! include_deleted {
+        filter_files.insert(FIELD_DELETED, false);
+    }
+
     let file_entries = get_complete_copy(mongo, filter_files).await?;
     for mut file in file_entries {
         let cuuid = match file.file_rep.path_cuuids.as_ref() {
@@ -1296,8 +1306,8 @@ async fn copy_files_collections<M>(
             None => return Err(CommonError::Str("File without a path_cuuid"))
         };
         let new_path = match map_new_path_by_old_cuuid.get(cuuid) {
-            Some(new_path) => new_path,
-            None => &destination_path_cuuid  // Root of destination
+            Some(new_path) => new_path.clone(),
+            None => destination_path_cuuid.clone()  // Root of destination
         };
 
         // Generate a new tuuid for this file
@@ -1306,7 +1316,7 @@ async fn copy_files_collections<M>(
 
         // Update file
         file.file_rep.tuuid = new_tuuid;
-        file.file_rep.path_cuuids = Some(new_path.to_owned());
+        file.file_rep.path_cuuids = Some(new_path);
 
         if let Some(media) = file.media.as_mut() {
             media.user_id = user_id.clone();  // Update user_id
