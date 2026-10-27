@@ -81,19 +81,23 @@ pub async fn process_transaction<M,E>(
                 TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(mongo, outbound, transaction, wrapper).await,
 
                 // Obsolete?
-                TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("Obsolete?"),
+                TRANSACTION_RECUPERER_DOCUMENTS_V2 => obsolete(outbound, wrapper).await,
 
-                _ => {
-                    warn!("Unknown action {} for process_transaction, skipping", action);
-                    Ok(())
-                }
+                _ => unknown(outbound, wrapper).await
             }
         },
-        _ => {
-            warn!("Unhandled message type with action {} for process_command, skipping", action);
-            Ok(())
-        }
+        _ => unknown(outbound, wrapper).await
     }
+}
+
+async fn obsolete(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
+    warn!("Obsolete transaction command called: {}", wrapper.delivery_info.routing_key);
+    outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(410, "Obsolete")).await
+}
+
+async fn unknown(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
+    warn!("Unknown transaction command called: {}", wrapper.delivery_info.routing_key);
+    outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Unknown command")).await
 }
 
 #[derive(Serialize)]

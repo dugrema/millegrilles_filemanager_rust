@@ -49,23 +49,27 @@ pub async fn process_command(
                 COMMAND_VISITS => command_visits(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
 
-                // Obsolete?
-                COMMANDE_RECLAMER_FUUIDS => todo!("Obsolete?"),
-                COMMAND_CONFIRM_RAG => todo!("Obsolete?"),
-                COMMAND_LEASE_FOR_RAG => todo!("Obsolete?"),
-                COMMAND_CONFIRMER_FICHIER_INDEXE => todo!("Obsolete?"),
+                // Obsolete - keeping to log applications that need to be fixed
+                COMMANDE_RECLAMER_FUUIDS => obsolete(outbound.as_ref(), wrapper).await,
+                COMMAND_CONFIRM_RAG => obsolete(outbound.as_ref(), wrapper).await,
+                COMMAND_LEASE_FOR_RAG => obsolete(outbound.as_ref(), wrapper).await,
+                COMMAND_CONFIRMER_FICHIER_INDEXE => obsolete(outbound.as_ref(), wrapper).await,
 
-                _ => {
-                    warn!("Unknown action {} for process_command, skipping", action);
-                    Ok(())
-                }
+                _ => unknown(outbound.as_ref(), wrapper).await,
             }
         },
-        _ => {
-            warn!("Unhandled message type with action {} for process_command, skipping", action);
-            Ok(())
-        }
+        _ => unknown(outbound.as_ref(), wrapper).await,
     }
+}
+
+async fn obsolete(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
+    warn!("Obsolete command called: {}", wrapper.delivery_info.routing_key);
+    outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(410, "Obsolete")).await
+}
+
+async fn unknown(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
+    warn!("Unknown request called: {}", wrapper.delivery_info.routing_key);
+    outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Unknown command")).await
 }
 
 async fn command_lease_files_for_image<M>(

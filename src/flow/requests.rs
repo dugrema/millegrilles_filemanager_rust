@@ -54,29 +54,33 @@ pub async fn process_request<M>(
                 REQUETE_SEARCH_INDEX_V2 => todo!(),
 
                 // Obsolete?
-                REQUETE_GET_CLES_FICHIERS => todo!("Obsolete?"),
-                REQUETE_VERIFIER_ACCES_FUUIDS => todo!("Obsolete?"),
-                REQUETE_VERIFIER_ACCES_TUUIDS => todo!("Obsolete?"),
-                REQUETE_STRUCTURE_REPERTOIRE => todo!("Obsolete?"),
-                REQUETE_SYNC_COLLECTION => todo!("Obsolete?"),
-                REQUETE_SOUS_REPERTOIRES => todo!("Obsolete?"),
-                REQUETE_RECHERCHE_INDEX => todo!("Obsolete?"),
-                REQUETE_INFO_VIDEO => todo!("Obsolete?"),
-                REQUETE_GET_CORBEILLE => todo!("Obsolete?"),
-                REQUETE_SYNC_CORBEILLE => todo!("Obsolete?"),
-                REQUETE_ACTIVITE_RECENTE => todo!("Obsolete?"),
-                REQUETE_FAVORIS => todo!("Obsolete?"),
-                _ => {
-                    warn!("Unknown action {} for process_request, skipping", action);
-                    Ok(())
-                }
+                REQUETE_GET_CLES_FICHIERS => obsolete(outbound, wrapper).await,
+                REQUETE_VERIFIER_ACCES_FUUIDS => obsolete(outbound, wrapper).await,
+                REQUETE_VERIFIER_ACCES_TUUIDS => obsolete(outbound, wrapper).await,
+                REQUETE_STRUCTURE_REPERTOIRE => obsolete(outbound, wrapper).await,
+                REQUETE_SYNC_COLLECTION => obsolete(outbound, wrapper).await,
+                REQUETE_SOUS_REPERTOIRES => obsolete(outbound, wrapper).await,
+                REQUETE_RECHERCHE_INDEX => obsolete(outbound, wrapper).await,
+                REQUETE_INFO_VIDEO => obsolete(outbound, wrapper).await,
+                REQUETE_GET_CORBEILLE => obsolete(outbound, wrapper).await,
+                REQUETE_SYNC_CORBEILLE => obsolete(outbound, wrapper).await,
+                REQUETE_ACTIVITE_RECENTE => obsolete(outbound, wrapper).await,
+                REQUETE_FAVORIS => obsolete(outbound, wrapper).await,
+                _ => unknown(outbound, wrapper).await,
             }
         },
-        _ => {
-            warn!("Unhandled message type with action {} for process_request, skipping", action);
-            Ok(())
-        }
+        _ => unknown(outbound, wrapper).await
     }
+}
+
+async fn obsolete(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
+    warn!("Obsolete request called: {}", wrapper.delivery_info.routing_key);
+    outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(410, "Obsolete")).await
+}
+
+async fn unknown(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
+    warn!("Unknown request called: {}", wrapper.delivery_info.routing_key);
+    outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(404, "Unknown command")).await
 }
 
 #[derive(Deserialize)]
