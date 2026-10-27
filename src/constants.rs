@@ -27,3 +27,4 @@ pub const TRANSACTION_RECYCLE_ITEMS_V3: &str = "recycleItemsV3";
 pub const COMMAND_REINDEX_FILES: &str = "reindexerConsignation";
 
 pub const REQUEST_GET_USER_LIST: &str = "getListeUsagers";
+pub const REQUEST_SEARCH_FILES: &str = "fichiers";

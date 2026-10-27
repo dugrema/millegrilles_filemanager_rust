@@ -1,28 +1,29 @@
-use crate::constants::{DOMAIN_NAME, ROLE_USAGER};
+use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mq::*;
 use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
 use crate::flow::directories::{ResultatStatistiquesRow, get_complete_files, get_directory_navigation_headers, get_shared_tuuid};
 use crate::flow::file_jobs::BackgroundJob;
-use crate::flow::keys::convert_decrypted_key_into_v2;
+use crate::flow::keys::{convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2};
 use crate::flow::media::get_information_fichier_stream;
 use crate::flow::request_models::*;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::DateTime;
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
-use millegrilles_common_rust::constantes::DELEGATION_GLOBALE_PROPRIETAIRE;
+use millegrilles_common_rust::constantes::{RolesCertificats, DELEGATION_GLOBALE_PROPRIETAIRE, Securite, ROLE_SOLR_RELAI};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, info, warn};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::ConfigService;
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use millegrilles_common_rust::generateur_messages::{RoutageMessageAction, RoutingValidation};
 use crate::external::mongo_struct::{ContactRow, RowPartagesUsager};
 use crate::flow::sharing::{get_contacts_user, map_user_ids_nom_usager};
 
@@ -51,7 +52,7 @@ pub async fn process_request<M>(
                 REQUETE_PARTAGES_USAGER => user_shared_collections(mongo, outbound, wrapper).await,
                 REQUETE_CHARGER_CONTACTS => user_shared_contacts(mongo, outbound, wrapper).await,
                 REQUETE_PARTAGES_CONTACT => user_shared_collections_contacts(mongo, outbound, wrapper).await,
-                REQUETE_SEARCH_INDEX_V2 => todo!(),
+                REQUETE_SEARCH_INDEX_V2 => search_index(mongo, outbound, wrapper).await,
 
                 // Obsolete?
                 REQUETE_GET_CLES_FICHIERS => obsolete(outbound, wrapper).await,
@@ -670,6 +671,190 @@ async fn user_shared_collections_contacts<M>(
     let usagers = map_user_ids_nom_usager(outbound, &user_ids).await?;
 
     let response = ReponsePartagesUsager { ok: true, partages, usagers: Some(usagers) };
+
+    outbound.respond(wrapper.delivery_info, response).await
+}
+
+
+#[derive(Deserialize)]
+struct RequestSearchIndexV2 {
+    query: String,
+    limit_count: Option<i64>,
+    /// Size of the inital batch to return
+    intitial_batch_size: Option<i64>,
+    /// Top-level directory, search all children
+    cuuid: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransfertRequeteRechercheIndex {
+    user_id: String,
+    query: String,
+    start: Option<i64>,
+    limit: Option<i64>,
+    cuuids_partages: Option<Vec<String>>,
+    cuuid: Option<String>,
+}
+
+impl TransfertRequeteRechercheIndex {
+    fn new_v2<S>(user_id: S, value: RequestSearchIndexV2) -> Self
+    where S: ToString
+    {
+        Self {
+            user_id: user_id.to_string(),
+            query: value.query,
+            start: Some(0),
+            limit: value.limit_count,
+            cuuids_partages: None,
+            cuuid: value.cuuid,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SearchResultDocument {
+    #[serde(rename = "id")]
+    tuuid: String,
+    user_id: String,
+    fuuid: Option<String>,
+    cuuids: Option<Vec<String>>,
+    score: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SearchResultContent {
+    docs: Option<Vec<SearchResultDocument>>,
+    #[serde(rename = "maxScore")]
+    max_score: Option<f64>,
+    #[serde(rename = "numFound")]
+    num_found: Option<usize>,
+    #[serde(rename = "numFoundExact")]
+    num_found_exact: Option<bool>,
+    start: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SearchResult {
+    ok: bool,
+    resultat: SearchResultContent
+}
+
+#[derive(Serialize)]
+struct RequestSearchIndexV2Response {
+    ok: bool,
+    files: Option<Vec<ResponseFichierRepVersion>>,
+    keys: Option<Vec<ResponseRequestDechiffrageV2Cle>>,
+    search_results: SearchResultContent,
+}
+
+async fn search_index<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    wrapper: MessageValidated
+) -> Result<(), CommonError> where M: MongoDaoTyped
+{
+    debug!("user_shared_collections");
+    let request: RequestSearchIndexV2 = wrapper.message.deserialize()?;
+    let user_id = match verify_user_certificate(wrapper.certificate.as_ref()) {
+        Ok(user_id) => user_id,
+        Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
+    };
+
+    let initial_batch_size = request.intitial_batch_size.unwrap_or(20) as usize;
+
+    let mut requete_transfert = TransfertRequeteRechercheIndex::new_v2(
+        &user_id, request);
+
+    if requete_transfert.limit.is_none() {
+        requete_transfert.limit = Some(200);
+    }
+
+    // Charger la liste des contact_id qui correspondent a l'usager courant
+    let contacts = get_contacts_user(mongo, user_id.as_str()).await?;
+
+    // Faire une requete pour obtenir tous les partages associes aux contacts
+    let contact_ids: Vec<&str> = contacts.iter().map(|c| c.contact_id.as_str()).collect();
+    let filtre = doc! {CHAMP_CONTACT_ID: {"$in": contact_ids}};
+    let collection = mongo.get_collection_typed::<RowPartagesUsager>(
+        NOM_COLLECTION_PARTAGE_COLLECTIONS)?;
+    let mut curseur = collection.find(filtre).await?;
+
+    // Conserver les tuuids (cuuids partages)
+    let mut cuuids = HashSet::new();
+    while let Some(row) = curseur.next().await {
+        cuuids.insert(row?.tuuid.to_owned());
+    }
+
+    // Convertir en vec
+    let cuuids: Vec<String> = cuuids.into_iter().collect();
+    requete_transfert.cuuids_partages = Some(cuuids);
+
+    let domaine: &str = RolesCertificats::SolrRelai.into();
+    let routing = RoutageMessageAction::builder(domaine, REQUEST_SEARCH_FILES, vec![Securite::L3Protege])
+        .timeout_blocking(5_000)
+        .validation(RoutingValidation {
+            ignore: false,
+            exchanges: Some(vec![Securite::L3Protege]),
+            domains: None,
+            roles: Some(vec![ROLE_SOLR_RELAI.to_string()]),
+        })
+        .build();
+
+    debug!("Searching index with parameters: {:?}", requete_transfert);
+    let search_response: SearchResult = match outbound.send_request(routing, requete_transfert).await {
+        Ok(response) => {
+            match response.is_err()? {
+                (true, err) => {
+                    warn!("Error response from index search: {:?}", err);
+                    return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, format!("Server error: {:?}", err).as_str())).await
+                },
+                _ => {
+                    debug!("Search response: {:?}", response.message.contenu);
+                    response.message.deserialize()?
+                }
+            }
+        },
+        Err(e) => {
+            error!("Error from index search: {:?}", e);
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, format!("Server error: {:?}", e).as_str())).await
+        }
+    };
+
+    let mut response = RequestSearchIndexV2Response {
+        ok: true,
+        files: None,
+        keys: None,
+        search_results: search_response.resultat,
+    };
+
+    if let Some(docs) = response.search_results.docs.as_ref () {
+        if docs.len() > 0 {
+            let first_batch_len = if docs.len() > initial_batch_size { initial_batch_size } else { docs.len() };
+            // debug!("search_index_v2 Load first {} docs", first_batch_len);
+            let first_batch = &docs[..first_batch_len];
+            let tuuids: Vec<&String> = first_batch.iter().map(|d| &d.tuuid).collect();
+            let filtre = doc!{ FIELD_TUUID: {"$in": &tuuids} };
+            // debug!("search_index_v2 Filter for loading files:\n{:?}", filtre);
+            let (result, _truncated) = get_complete_files(mongo, filtre, None, None, None).await?;
+            // debug!("Loaded {} complete files", result.fichiers.len());
+            response.files = Some(result.fichiers);
+
+            // Retrieve decryption keys
+            let mut cle_ids = HashSet::new();
+            if let Some(files) = response.files.as_ref() {
+                for r in files {
+                    let keys = extract_key_ids_from_file(r)?;
+                    cle_ids.extend(keys.iter().map(|k| k.to_string()));
+                }
+            }
+            let cle_ids: Vec<String> = cle_ids.into_iter().collect();
+            let keys = outbound.get_keys(DOMAIN_NAME, cle_ids, None).await?;
+            let keys = convert_decrypted_key_vec_into_v2(keys)?;
+            response.keys = Some(keys);
+        } else {
+            debug!("search_index_v2 No results in search");
+        }
+    }
 
     outbound.respond(wrapper.delivery_info, response).await
 }

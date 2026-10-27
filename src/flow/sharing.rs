@@ -13,11 +13,11 @@ use crate::external::mongo_struct::ContactRow;
 use crate::flow::request_models::{ReponseUsager, ResponseUsersList};
 
 pub async fn get_contacts_user<M>(
-    middleware: &M,
+    mongo: &M,
     user_id: &str
 ) -> Result<Vec<ContactRow>, CommonError> where M: MongoDaoTyped {
     let mut contacts = Vec::new();
-    let collection = middleware.get_collection_typed::<ContactRow>(
+    let collection = mongo.get_collection_typed::<ContactRow>(
         NOM_COLLECTION_PARTAGE_CONTACT)?;
     let filtre = doc! { CHAMP_CONTACT_USER_ID: user_id };
     let mut curseur = collection.find(filtre).await?;
