@@ -1642,12 +1642,94 @@ async fn copy_files_collections(
     mongo: &dyn MongoDao,
     wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> {
-    let transaction: TransactionMoveV2 = wrapper.message.deserialize()?;
+    let transaction: TransactionCopyV3 = wrapper.message.deserialize()?;
+    let created = wrapper.message.estampille.clone();
+    let user_id = transaction.user_id.clone();
 
-    todo!();
+    let mut insertions_filerep = Vec::with_capacity(transaction.entries.len());
+    let mut insertions_media = Vec::with_capacity(transaction.entries.len());
+    let mut insertions_comments = Vec::with_capacity(transaction.entries.len());
 
-    // let mut aggregator = TransactionOperationAggregator::new();
-    // aggregator.ordered = Some(models);
-    //
-    // Ok(aggregator)
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let mut models = Vec::new();
+
+    for entry in transaction.entries {
+        let tuuid = entry.file_rep.tuuid.clone();
+
+        // Insert tuuid back into the matching fuuid entries
+        if let Some(fuuids) = entry.file_rep.fuuids_versions.as_ref() {
+            let filter_version = doc! { FIELD_FUUID: { "$in": fuuids } };
+            let ops_version = doc! {
+                "$addToSet": { FIELD_TUUIDS: &tuuid },
+                "$currentDate": { FIELD_DATE_MODIFIED: true }
+            };
+            models.push(
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(collection_versions.namespace())
+                        .filter(filter_version)
+                        .update(ops_version)
+                        .build()
+                )
+            );
+        }
+
+        insertions_filerep.push(bson::serialize_to_document(&NodeFichierRepOwned {
+            tuuid: entry.file_rep.tuuid,
+            user_id: user_id.clone(),
+            type_node: entry.file_rep.type_node,
+            supprime: false,
+            supprime_indirect: false,
+            metadata: entry.file_rep.metadata,
+            flag_index: false,
+            flag_rag: false,
+            flag_summary: false,
+            mimetype: entry.file_rep.mimetype,
+            fuuids_versions: entry.file_rep.fuuids_versions,
+            path_cuuids: entry.file_rep.path_cuuids,
+            created: created.clone(),
+            modified: Utc::now(),
+        })?);
+
+        if let Some(media) = entry.media {
+            insertions_media.push(bson::serialize_to_document(&MediaOwnedRow {
+                fuuid: media.fuuid,
+                user_id: user_id.clone(),
+                created: created.clone(),
+                modified: Utc::now(),
+                height: media.height,
+                width: media.width,
+                duration: media.duration,
+                video_codec: media.video_codec,
+                anime: media.anime,
+                images: media.images,
+                video: media.video,
+                audio: media.audio,
+                subtitles: media.subtitles,
+                web_subtitles: media.web_subtitles,
+            })?);
+        }
+
+        if let Some(comments) = entry.comments {
+            for comment in comments {
+                insertions_comments.push(bson::serialize_to_document(&FileComment {
+                    tuuid: tuuid.clone(),
+                    comment_id: comment.comment_id,
+                    encrypted_data: comment.encrypted_data,
+                    date: comment.date,
+                    user_id: comment.user_id,
+                })?);
+            }
+        }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.batch_insertions = Some(vec![
+        BatchInsertions::new(NOM_COLLECTION_FICHIERS_REP, insertions_filerep),
+        BatchInsertions::new(NOM_COLLECTION_MEDIA, insertions_media),
+        BatchInsertions::new(NOM_COLLECTION_FILE_COMMENTS, insertions_comments),
+    ]);
+    aggregator.ordered = Some(models);
+
+    Ok(aggregator)
 }
