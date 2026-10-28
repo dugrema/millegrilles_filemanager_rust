@@ -274,37 +274,59 @@ async fn request_statistics_info<M>(
         Err(e) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, format!("Access denied: {:?}", e).as_str())).await
     };
 
-    let user_id = if let Some(contact_id) = request.contact_id {
-        todo!("share")
-        // // Determiner le user_id effectif pour la requete en confirmant le droit d'acces via contact
-        // let filtre = doc!{ CHAMP_CONTACT_ID: contact_id, CHAMP_CONTACT_USER_ID: &user_id };
-        // let collection = mongo.get_collection_typed::<ContactRow>(NOM_COLLECTION_PARTAGE_CONTACT)?;
-        // match collection.find_one(filtre).await? {
-        //     Some(inner) => inner.user_id ,  // User id du proprietaire des fichiers
-        //     None => {
-        //         error!("requetes.requete_verifier_acces_fuuids Acces refuse, mauvais contact_id");
-        //         return return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
-        //     }
-        // }
-    } else {
-        user_id
+    let allowed_cuuids = match request.contact_id.as_ref() {
+        Some(contact_id) => {
+            debug!("request_files_by_tuuid Allow any shared collection for user_id: {}", user_id);
+            let allowed_cuuids = get_shared_cuuids_by_userid(
+                mongo,
+                user_id.as_str(),
+                None,
+                Some(contact_id)
+            ).await?;
+            Some(allowed_cuuids)
+        },
+        None => None
     };
 
     let mut filter = doc! {
-        FIELD_USER_ID: &user_id,
         FIELD_DELETED: false,
         FIELD_DELETED_INDIRECT: false,
     };
-
-    if let Some(cuuid) = request.cuuid.as_ref() {
-        // Filter on directory
-        filter.insert(
-            "$or",
-            bson::serialize_to_bson(&vec![
-                doc!{CHAMP_TUUID: &cuuid},
-                doc!{CHAMP_PATH_CUUIDS: &cuuid}
-            ])?
-        );
+    match allowed_cuuids {
+        Some(cuuids) => {
+            // Filter on either authenticated user_id (local) or allowed parent folders (cuuids)
+            let mut vec_combined_checks = vec![
+                doc! {"$or": [
+                    // { FIELD_USER_ID: &user_id },
+                    { FIELD_TUUID: { "$in": &cuuids } },
+                    { CHAMP_PATH_CUUIDS: { "$in": &cuuids } }
+                ]}
+            ];
+            if let Some(cuuid) = request.cuuid.as_ref() {
+                // Filter on a specific directory
+                vec_combined_checks.push(
+                    doc! {"$or": [
+                        doc!{ CHAMP_TUUID: &cuuid },
+                        doc!{ CHAMP_PATH_CUUIDS: &cuuid }
+                    ]}
+                );
+            }
+            filter.insert("$and", bson::serialize_to_bson(&vec_combined_checks)?);
+        },
+        None => {
+            // Filter on authenticated user_id
+            filter.insert(FIELD_USER_ID, &user_id);
+            if let Some(cuuid) = request.cuuid.as_ref() {
+                // Filter on directory
+                filter.insert(
+                    "$or",
+                    bson::serialize_to_bson(&vec![
+                        doc!{ CHAMP_TUUID: &cuuid },
+                        doc!{ CHAMP_PATH_CUUIDS: &cuuid }
+                    ])?
+                );
+            }
+        }
     }
 
     let resultat = get_directory_statistics(mongo, filter).await?;

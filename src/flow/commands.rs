@@ -559,7 +559,6 @@ async fn create_stream_token<M>(
             // Filter on either authenticated user_id (local) or allowed shared parent folders (cuuids)
             filter_file_rep.insert("$or",  bson::serialize_to_bson(&vec![
                 doc!{ FIELD_USER_ID: &user_id },
-                // doc!{ FIELD_TUUID: { "$in": &cuuids } },
                 doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
             ])?);
         },
