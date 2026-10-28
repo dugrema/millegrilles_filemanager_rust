@@ -1388,6 +1388,15 @@ async fn copy_files_collections<M>(
             media.user_id = user_id.clone();  // Update user_id
         }
 
+        if let Some(comments) = file.comments.as_mut() {
+            for comment in comments {
+                // Generate new unique identifier for the comment
+                let new_comment_id = format!("{}{:08x}", tuuid_prefix, tuuid_counter);
+                tuuid_counter += 1;
+                comment.comment_id = new_comment_id;
+            }
+        }
+
         transaction_value.entries.push(file);
     }
 
