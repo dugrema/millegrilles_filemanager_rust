@@ -5,7 +5,6 @@ use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
 use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_directory_statistics, get_shared_tuuid, ResultatStatistiquesRow};
 use crate::flow::file_jobs::BackgroundJob;
 use crate::flow::keys::{allow_key_decryption, convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2, fetch_decryption_information, FileDecryptionInformation};
-use crate::flow::media::get_information_fichier_stream;
 use crate::flow::request_models::*;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
@@ -57,7 +56,7 @@ pub async fn process_request<M>(
                 REQUETE_GET_CLES_STREAM => get_streaming_keys(mongo, outbound, wrapper).await,
 
                 // Obsolete?
-                REQUETE_JWT_STREAMING => create_jwt_streaming(mongo, outbound, wrapper).await,
+                REQUETE_JWT_STREAMING => obsolete(outbound, wrapper).await,
                 REQUETE_DOCUMENTS_PAR_TUUID => obsolete(outbound, wrapper).await,
                 REQUETE_GET_CLES_FICHIERS => obsolete(outbound, wrapper).await,
                 REQUETE_VERIFIER_ACCES_FUUIDS => obsolete(outbound, wrapper).await,
@@ -476,70 +475,6 @@ struct ReponseCreerJwtStreaming {
     ok: bool,
     err: Option<String>,
     jwt_token: Option<String>,
-}
-
-async fn create_jwt_streaming<M>(
-    mongo: &M,
-    outbound: &MessageOutboundFacade,
-    wrapper: MessageValidated
-) -> Result<(), CommonError> where M: MongoDaoTyped
-{
-    debug!("create_jwt_streaming");
-    let request: RequeteGenererJwtStreaming = wrapper.message.deserialize()?;
-
-    // Authorization, includes checking for shared folder access (impersonating other user_id for request)
-    let user_id = match wrapper.certificate.get_user_id()? {
-        Some(user_id) => user_id,
-        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
-    };
-    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
-       return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
-    }
-
-    let user_id = match request.contact_id.as_ref() {
-        Some(contact_id) => {
-            todo!("share")
-            // // Verifier que le contact_id et les contact_user_id correspondent, extraire user_id partage
-            // let filtre = doc! { CHAMP_CONTACT_ID: &contact_id, CHAMP_CONTACT_USER_ID: user_id };
-            // let collection = mongo.get_collection_typed::<RowPartageContactOwned>(NOM_COLLECTION_PARTAGE_CONTACT)?;
-            // let contact = match collection.find_one(filtre, None).await? {
-            //     Some(inner) => inner,
-            //     None => {
-            //         return Ok(Some(middleware.reponse_err(None, None, Some("contact_id et user_id mismatch ou manquant"))?))
-            //     }
-            // };
-            // // Ok, le contact est valide. Retourner user_id de l'usager qui a fait le partage.
-            // contact.user_id
-        },
-        None => user_id.to_owned()
-    };
-
-    // Verifier si l'usager a acces aux fuuids demandes
-    let mut fuuids = Vec::new();
-    fuuids.push(request.fuuid.as_str());
-    if let Some(fuuid) = request.fuuid_ref.as_ref() {
-        fuuids.push(fuuid.as_str());
-    }
-    let resultat = verifier_acces_usager_media(mongo, &user_id, &fuuids).await?;
-    if resultat.len() != fuuids.len() {
-        warn!("requete_verifier_acces_fuuids Mismatch, l'usager n'a pas acces aux fuuids demandes");
-        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
-    }
-
-    // L'acces aux fuuids est OK. Charger l'information de dechiffrage.
-    debug!("requete_verifier_acces_fuuids Charger information de dechiffrage pour {}", request.fuuid);
-    let fuuid_ref = match request.fuuid_ref.as_ref() { Some(inner) => Some(inner.as_str()), None => None };
-    let info_stream = get_information_fichier_stream(mongo, outbound, &user_id, &request.fuuid, fuuid_ref).await?;
-    todo!("streaming")
-    // let jwt_token = generer_jwt(mongo, &user_id, &request.fuuid, info_stream.mimetype, info_stream.dechiffrage)?;
-    //
-    // // let reponse = json!({ "fuuids_acces": resultat , "acces_tous": acces_tous, "user_id": user_id });
-    // let reponse = ReponseCreerJwtStreaming {
-    //     ok: true,
-    //     err: None,
-    //     jwt_token: Some(jwt_token)
-    // };
-    // outbound.respond_encrypted(wrapper.delivery_info, reponse, wrapper.certificate.as_ref()).await?;
 }
 
 #[derive(Deserialize)]
