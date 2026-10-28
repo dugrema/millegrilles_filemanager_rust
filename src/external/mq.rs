@@ -185,7 +185,7 @@ pub fn init_queues(mq: &MessagingServiceImpl) -> Result<(), CommonError> {
                 ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_PARTAGES_CONTACT), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_INFO_STATISTIQUES), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_STRUCTURE_REPERTOIRE), exchange: Securite::L2Prive },
-                ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_JWT_STREAMING), exchange: Securite::L2Prive },
+                // ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_JWT_STREAMING), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_SOUS_REPERTOIRES), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_RECHERCHE_INDEX), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("requete.{}.{}", DOMAIN_NAME, REQUETE_INFO_VIDEO), exchange: Securite::L2Prive },
@@ -215,6 +215,7 @@ pub fn init_queues(mq: &MessagingServiceImpl) -> Result<(), CommonError> {
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMANDE_COMPLETER_PREVIEWS), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_LEASE_FOR_IMAGE), exchange: Securite::L2Prive },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMANDE_JOB_GET_KEY), exchange: Securite::L2Prive },
+                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_CREATE_STREAM_TOKEN), exchange: Securite::L2Prive },
 
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMANDE_REINDEXER), exchange: Securite::L3Protege },
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMANDE_GET_CLE_JOB_CONVERSION), exchange: Securite::L3Protege },

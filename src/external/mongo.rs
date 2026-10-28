@@ -119,6 +119,8 @@ pub const VIDEO_CONVERSION_TIMEOUT_PERSISTING: i32 = 60 * 60;  // Secondes
 
 pub const VALUE_NODE_TYPE_FICHIER: &str = "Fichier";
 
+pub const VALUE_MEDIA_AUDIO: &str = "audio";
+pub const VALUE_MEDIA_VIDEO: &str = "video";
 
 pub async fn create_index_mongodb(db: &dyn MongoDao) -> Result<(), CommonError> {
     db.create_index(
