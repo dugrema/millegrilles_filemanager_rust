@@ -932,7 +932,12 @@ async fn get_streaming_keys<M>(
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
     }
 
-    let keys = match fetch_decryption_information(mongo, outbound, &request.fuuids).await {
+    let keys = match fetch_decryption_information(
+        mongo,
+        outbound,
+        token_info.user_id.as_str(),
+        &request.fuuids
+    ).await {
         Ok(keys) => keys,
         Err(e) => {
             error!("Error in fetch_decryption_information: {:?}", e);

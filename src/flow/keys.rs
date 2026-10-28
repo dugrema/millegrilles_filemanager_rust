@@ -14,6 +14,7 @@ use millegrilles_common_rust::millegrilles_cryptographie::x509::EnveloppeCertifi
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
 use millegrilles_common_rust::serde_json;
 use millegrilles_common_rust::tokio_stream::StreamExt;
+use millegrilles_common_rust::tracing::debug;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::impls::rabbitmq_consumer::DeliveryInfo;
 use serde::Serialize;
@@ -112,6 +113,7 @@ pub struct FileDecryptionInformation {
 pub async fn fetch_decryption_information<M>(
     mongo: &M,
     outbound: &MessageOutboundFacade,
+    user_id: &str,
     fuuids: &Vec<String>,
 ) -> Result<HashMap<String, FileDecryptionInformation>, CommonError> where M: MongoDaoTyped {
     // Start by fetching all decryption info for the matching fuuids. Some may be in the media table.
@@ -156,7 +158,11 @@ pub async fn fetch_decryption_information<M>(
 
     // Only look-up the media table when necessary (e.g. keys are missing and there are media fuuids)
     if response_map.len() < fuuids.len() && ! media_fuuids.is_empty() {
-        let filter = doc!{ FIELD_FUUID: { "$in": &media_fuuids } };
+        debug!("Loading information for fuuids with video: {:?}", media_fuuids);
+        let filter = doc!{
+            FIELD_FUUID: { "$in": &media_fuuids },
+            FIELD_USER_ID: user_id
+        };
         let collection_media = mongo.get_collection_typed::<MediaOwnedRow>(NOM_COLLECTION_MEDIA)?;
         let mut cursor = collection_media.find(filter).await?;
         while let Some(row) = cursor.next().await {
@@ -164,32 +170,32 @@ pub async fn fetch_decryption_information<M>(
 
             // Only check videos, the other types of media (images, audio) are not supported.
             if let Some(video) = row.video {
-                for fuuid in fuuids {
-                    if let Some(value) = video.get(fuuid) {
-                        let format: Option<FormatChiffrage> = match value.format.as_ref() {
+                for video_item in video.values() {
+                    if fuuids.contains(&video_item.fuuid_video) {
+                        let format: Option<FormatChiffrage> = match video_item.format.as_ref() {
                             Some(inner) => Some(inner.as_str().try_into().map_err(|_| CommonError::Str("Error mapping encryption format"))?),
                             None => None
                         };
 
                         response_map.insert(
-                            value.fuuid_video.clone(),
+                            video_item.fuuid_video.clone(),
                             FileDecryptionInformation {
-                                fuuid: value.fuuid_video.clone(),
+                                fuuid: video_item.fuuid_video.clone(),
                                 decryption: CleSecreteSerialisee {
                                     cle_secrete_base64: Default::default(), // Placeholder
-                                    cle_id: match value.cle_id.as_ref() {
+                                    cle_id: match video_item.cle_id.as_ref() {
                                         Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping key_id to 128 chars"))?),
                                         None => return Err(CommonError::Str("Missing key_id decryption information"))
                                     },
                                     format,
-                                    nonce: match value.nonce.as_ref() {
+                                    nonce: match video_item.nonce.as_ref() {
                                         Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?),
                                         None => None
                                     },
                                     verification: None,
                                 },
-                                filesize: value.taille_fichier,
-                                mimetype: value.mimetype.clone(),
+                                filesize: video_item.taille_fichier,
+                                mimetype: video_item.mimetype.clone(),
                             }
                         );
                     }
@@ -199,6 +205,7 @@ pub async fn fetch_decryption_information<M>(
     }
 
     if response_map.len() < fuuids.len() {
+        debug!("Missing fuuids from decryption request.\nRequested: {:?}\nFound: {:?}", fuuids, response_map.keys());
         return Err(CommonError::Str("Unable to find all requested files"))
     }
 
