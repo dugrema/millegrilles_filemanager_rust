@@ -885,7 +885,7 @@ pub struct ParametresGetClesStream {
     /// Requested keys
     pub fuuids: Vec<String>,
     // pub jwt: Option<String>,  // Old JWT token, obsolete
-    pub user_id: Option<String>,
+    // pub user_id: Option<String>,
 }
 
 #[derive(Serialize)]
