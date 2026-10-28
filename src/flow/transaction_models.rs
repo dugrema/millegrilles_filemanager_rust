@@ -562,3 +562,9 @@ pub async fn get_complete_copy<M>(
 
     Ok(response)
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PermanentlyDeleteFilesTransaction {
+    pub tuuids: Vec<String>,
+    pub fuuids: Option<Vec<String>>,
+}

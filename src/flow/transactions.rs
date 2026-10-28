@@ -88,8 +88,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_DELETE_V3 => delete_file_reps_v3(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_MOVE_V2 => move_files_collections(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_COPY_V3 => copy_files_collections(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_SUPPRIMER_ORPHELINS => todo!(),
-            TRANSACTION_PERMANENTLY_DELETE_FILES => todo!(),
+            TRANSACTION_PERMANENTLY_DELETE_FILES => permanently_delete_files(self.mongo.as_ref(), wrapper).await,
 
             // Media
             TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(self.mongo.as_ref(), wrapper).await,
@@ -119,6 +118,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!("legacy"),
             TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("legacy"),
             TRANSACTION_COPY_V2 => todo!("legacy"),
+            TRANSACTION_SUPPRIMER_ORPHELINS => todo!("legacy"),
 
             // Obsolete transactions - keep to avoid getting an error on rebuild
             TRANSACTION_IMAGE_SUPPRIMER_JOB => obsolete(),
@@ -1744,5 +1744,56 @@ async fn copy_files_collections(
         aggregator.ordered = Some(models);
     }
 
+    Ok(aggregator)
+}
+
+async fn permanently_delete_files(
+    mongo: &dyn MongoDao,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> {
+    let transaction: PermanentlyDeleteFilesTransaction = wrapper.message.deserialize()?;
+
+    let mut delete_models = Vec::with_capacity(5);
+
+    // Delete from fichierrep
+    let filter_tuuids = doc!{ FIELD_TUUID: { "$in": transaction.tuuids } };
+    let collection_fichiersrep = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    delete_models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_fichiersrep.namespace())
+                .filter(filter_tuuids)
+                .build()
+        )
+    );
+
+    if let Some(fuuids) = transaction.fuuids {
+        let filtre_fuuids = doc! { FIELD_FUUID: { "$in": fuuids } };
+
+        // Delete from the media collection
+        let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+        delete_models.push(
+            WriteModel::DeleteMany(
+                DeleteManyModel::builder()
+                    .namespace(collection_media.namespace())
+                    .filter(filtre_fuuids.clone())
+                    .build()
+            )
+        );
+
+        // Delete from the versions collection
+        let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+        delete_models.push(
+            WriteModel::DeleteMany(
+                DeleteManyModel::builder()
+                    .namespace(collection_versions.namespace())
+                    .filter(filtre_fuuids)
+                    .build()
+            )
+        );
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(delete_models);
     Ok(aggregator)
 }
