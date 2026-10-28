@@ -15,12 +15,12 @@ use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDaoImpl, MongoDaoTyped};
-use millegrilles_common_rust::tracing::{error, info, warn};
+use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{FormatService, MessagingService};
-use millegrilles_common_rust::{serde_json, tokio};
+use millegrilles_common_rust::{bson, serde_json, tokio};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::CleSecreteMgs4;
@@ -519,6 +519,7 @@ struct CommandCreateFileAccessToken {
 use millegrilles_common_rust::base64::{engine::general_purpose::URL_SAFE_NO_PAD as base64_url_nopad, Engine as _};
 use millegrilles_common_rust::millegrilles_cryptographie::x509::EnveloppeCertificat;
 use millegrilles_common_rust::v3::impls::rabbitmq_consumer::DeliveryInfo;
+use crate::flow::file_sharing::get_shared_cuuids_by_userid;
 use crate::flow::keys::allow_key_decryption;
 
 #[derive(Serialize)]
@@ -538,14 +539,36 @@ async fn create_stream_token<M>(
         Err(_) => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Acces denied")).await
     };
 
-    let effective_user_id = match command.contact_id {
+    let allowed_shared_cuuids = match command.contact_id.as_ref() {
         Some(contact_id) => {
-            todo!("share")
+            debug!("request_files_by_tuuid Allow any shared collection for user_id: {}", user_id);
+            let allowed_cuuids = get_shared_cuuids_by_userid(
+                mongo,
+                user_id.as_str(),
+                None,
+                Some(contact_id),
+            ).await?;
+            Some(allowed_cuuids)
         },
-        None => user_id.clone()
+        None => None
     };
 
-    let filter_file_rep = doc!{ FIELD_TUUID: &command.tuuid, FIELD_USER_ID: &effective_user_id };
+    let mut filter_file_rep = doc! { FIELD_TUUID: &command.tuuid };
+    match allowed_shared_cuuids {
+        Some(cuuids) => {
+            // Filter on either authenticated user_id (local) or allowed shared parent folders (cuuids)
+            filter_file_rep.insert("$or",  bson::serialize_to_bson(&vec![
+                doc!{ FIELD_USER_ID: &user_id },
+                // doc!{ FIELD_TUUID: { "$in": &cuuids } },
+                doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
+            ])?);
+        },
+        None => {
+            // Filter on authenticated user_id
+            filter_file_rep.insert(FIELD_USER_ID, &user_id);
+        }
+    }
+
     let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
     let file_rep_row = match collection.find_one(filter_file_rep).await? {
         Some(file_rep_row) => file_rep_row,
