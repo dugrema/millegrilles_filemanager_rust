@@ -20,7 +20,7 @@ use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
-use millegrilles_common_rust::{hex, serde_json};
+use millegrilles_common_rust::{bson, hex, serde_json};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
@@ -29,6 +29,7 @@ use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::MessagingService;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use crate::flow::file_sharing::get_shared_cuuids_by_userid;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -1141,9 +1142,18 @@ async fn copy_files_collections<M>(
     };
     let include_deleted = command.include_deleted.unwrap_or(false);
 
-    let user_id_source = match command.contact_id.as_ref() {
-        Some(contact_id) => todo!("share"),
-        None => user_id.clone()
+    let allowed_cuuids = match command.contact_id.as_ref() {
+        Some(contact_id) => {
+            debug!("request_files_by_tuuid Allow any shared collection for user_id: {}", user_id);
+            let allowed_cuuids = get_shared_cuuids_by_userid(
+                mongo,
+                user_id.as_str(),
+                None,
+                Some(contact_id)
+            ).await?;
+            Some(allowed_cuuids)
+        },
+        None => None
     };
 
     // The message.id will be used to create new tuuids, using the first 56 hex chars and padding
@@ -1173,10 +1183,22 @@ async fn copy_files_collections<M>(
         None => vec![destination_filerep.tuuid.clone()]
     };
 
-    let filter_request = doc! {
-        FIELD_TUUID: { "$in": &command.inclure_tuuids },
-        FIELD_USER_ID: &user_id_source
-    };
+    let mut filter_request = doc! { FIELD_TUUID: { "$in": &command.inclure_tuuids } };
+    match allowed_cuuids.as_ref() {
+        Some(cuuids) => {
+            // Filter on either authenticated user_id (local) or allowed parent folders (cuuids)
+            filter_request.insert("$or",  bson::serialize_to_bson(&vec![
+                doc!{ FIELD_USER_ID: &user_id },
+                doc!{ FIELD_TUUID: { "$in": &cuuids } },
+                doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
+            ])?);
+        },
+        None => {
+            // Filter on authenticated user_id
+            filter_request.insert(FIELD_USER_ID, &user_id);
+        }
+    }
+
     let mut cursor = collection_filereps.find(filter_request).await?;
     while let Some(row) = cursor.next().await {
         let file_rep = row?;
@@ -1197,11 +1219,24 @@ async fn copy_files_collections<M>(
     debug!("Top level directories: {:?}", top_level_directories);
     let mut filter_request = doc! {
         FIELD_PATH_CUUIDS: { "$in": top_level_directories },
-        FIELD_USER_ID: &user_id_source,
         FIELD_NODE_TYPE: TypeNode::Repertoire.to_str(),
     };
     if ! include_deleted {
         filter_request.insert(FIELD_DELETED, false);
+    }
+    match allowed_cuuids.as_ref() {
+        Some(cuuids) => {
+            // Filter on either authenticated user_id (local) or allowed parent folders (cuuids)
+            filter_request.insert("$or",  bson::serialize_to_bson(&vec![
+                doc!{ FIELD_USER_ID: &user_id },
+                doc!{ FIELD_TUUID: { "$in": &cuuids } },
+                doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
+            ])?);
+        },
+        None => {
+            // Filter on authenticated user_id
+            filter_request.insert(FIELD_USER_ID, &user_id);
+        }
     }
 
     let mut cursor = collection_filereps.find(filter_request).await?;
@@ -1241,10 +1276,23 @@ async fn copy_files_collections<M>(
     let mut map_new_path_by_old_cuuid: HashMap<String, Vec<String>> = HashMap::new();
 
     let all_directories: Vec<&String> = map_new_by_old_cuuid.keys().collect();
-    let filter_directories = doc! {
+    let mut filter_directories = doc! {
         FIELD_TUUID: { "$in": &all_directories },
-        FIELD_USER_ID: &user_id_source,
     };
+    match allowed_cuuids.as_ref() {
+        Some(cuuids) => {
+            // Filter on either authenticated user_id (local) or allowed parent folders (cuuids)
+            filter_directories.insert("$or",  bson::serialize_to_bson(&vec![
+                doc!{ FIELD_USER_ID: &user_id },
+                doc!{ FIELD_TUUID: { "$in": &cuuids } },
+                doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
+            ])?);
+        },
+        None => {
+            // Filter on authenticated user_id
+            filter_directories.insert(FIELD_USER_ID, &user_id);
+        }
+    }
     let directory_entries = get_complete_copy(mongo, filter_directories).await?;
     for mut directory in directory_entries {
         let old_tuuid = &directory.file_rep.tuuid;
@@ -1291,7 +1339,7 @@ async fn copy_files_collections<M>(
             { FIELD_TUUID: { "$in": &file_tuuids } },
             { FIELD_PATH_CUUIDS: { "$in": &all_directories } },
         ],
-        FIELD_USER_ID: &user_id_source,
+        // FIELD_USER_ID: &user_id_source,
         FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
     };
     if ! include_deleted {
