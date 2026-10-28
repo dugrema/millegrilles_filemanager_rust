@@ -43,6 +43,86 @@ pub async fn process_ticker_job(
     // Database maintenance
 
     warn!("TODO - database maintenance");
+    // // Process the log of filehost visits received from batch transfers
+    //     if minutes % 6 == 5
+    //     // if minutes % 5 == 3
+    //     {
+    //         if let Err(e) = process_visits(middleware).await {
+    //             error!("process_visits Error processing filehost visits log: {:?}", e);
+    //         }
+    //     }
+    //
+    //     // Claim all files to avoid having them being deleted from filehosts.
+    //     if hours % 8 == 1 && minutes == 14
+    //     // if minutes % 5 == 0
+    //     {
+    //         if let Err(e) = claim_all_files(middleware).await {
+    //             error!("verifier_visites Erreur entretien visites fichiers: {:?}", e);
+    //         }
+    //     }
+    //
+    //     // Check if new files have been transferred to filehosts - this complements the newFuuid event.
+    //     if minutes % 6 == 0 {
+    //         info!("reclamer_fichiers for new files STARTING");
+    //         if let Err(e) = reclamer_fichiers(middleware, gestionnaire, true).await {
+    //             error!("reclamer_fichiers Error: {:?}", e);
+    //         }
+    //         info!("reclamer_fichiers for new files DONE");
+    //     }
+    //
+    //     if hours % 3 == 2 && minutes == 27
+    //     {
+    //         // Remove media/indexation jobs that will never complete
+    //         info!("maintenance_impossible_jobs STARTING");
+    //         if let Err(e) = maintenance_impossible_jobs(middleware, gestionnaire).await {
+    //             error!("maintenance_impossible_jobs Error: {:?}", e);
+    //         }
+    //         info!("maintenance_impossible_jobs DONE");
+    //     }
+    //
+    //     if hours % 6 == 1 && minutes == 6
+    //     // if minutes % 5 == 1
+    //     {
+    //         if let Err(e) = maintain_deleted_files(middleware, gestionnaire).await {
+    //             error!("maintain_deleted_files Error: {:?}", e);
+    //         }
+    //     }
+    //
+    //     if minutes % 30 == 13
+    //     {
+    //         info!("create_missing_jobs STARTING");
+    //         if let Err(e) = create_missing_jobs(middleware).await {  // Creer jobs media/indexation manquantes (recovery)
+    //             info!("create_missing_jobs Error: {:?}", e);
+    //         }
+    //         info!("create_missing_jobs DONE");
+    //     }
+    //
+    //     if minutes % 4 == 2
+    //     {
+    //         // Restart expired media jobs
+    //         info!("entretien_jobs_expirees STARTING");
+    //         let fetch_filehosts = minutes == 2;  // Once an hour
+    //         if let Err(e) = entretien_jobs_expirees(middleware, fetch_filehosts).await {
+    //             error!("entretien_jobs_expirees Error: {:?}", e);
+    //         }
+    //         info!("entretien_jobs_expirees DONE");
+    //     }
+    //
+    //     // Recalculer les quotas a toutes les 3 heures
+    //     if hours % 3 == 1 && minutes == 14
+    //     {
+    //         info!("calculer_quotas STARTING");
+    //         if let Err(e) = calculer_quotas(middleware).await {
+    //             error!("calculer_quotas Error: {:?}", e);
+    //         };
+    //         info!("calculer_quotas DONE");
+    //     }
+    //
+    //     if hours % 3 == 2 && minutes == 9 {
+    //         if let Err(e) = run_cleanup_leases(middleware).await {
+    //             error!("run_cleanup_leases Error: {:?}", e);
+    //         }
+    //     }
 
     // Backup handling
     if minute % 30 == 4 {

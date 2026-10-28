@@ -21,6 +21,9 @@ pub const NOM_COLLECTION_STREAM_TOKENS: &str = "FileManager/streamTokens";
 
 
 pub const INDEX_REDO_LOG_ID: &str = "redo_log_id";
+pub const NOM_INDEX_ETAT_JOBS: &str = "etat_jobs_2";
+pub const NOM_INDEX_USER_ID_TUUIDS: &str = "user_id_tuuids";
+pub const NOM_INDEX_USER_ID: &str = "idx_user_id";
 
 // New fields
 pub const FIELD_USER_ID: &str = "user_id";
@@ -91,6 +94,8 @@ pub const CHAMP_TAILLE: &str = "taille";
 // pub const CHAMP_INSTANCES: &str = "instances";
 pub const CHAMP_DATE_MAJ: &str = "date_maj";
 pub const CHAMP_VISITES: &str = "visites";
+pub const CHAMP_CLE_CONVERSION: &str = "cle_conversion";
+pub const CHAMP_INSTANCES: &str = "instances";
 
 pub const CONST_COMMENT_TAGS: &str = "tags";
 
@@ -153,6 +158,225 @@ pub async fn create_index_mongodb(db: &dyn MongoDao) -> Result<(), CommonError> 
             ChampIndex { nom_champ: String::from(FIELD_DATE_PROCESSED), direction: 1 },
         ),
         Some(IndexOptions { nom_index: Some(String::from(INDEX_DATE_PROCESSED)), unique: false })
+    ).await?;
+
+    // Data tables
+
+    // Fichiers Rep
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from("fuuids_versions"), direction: 1},
+            ChampIndex {nom_champ: String::from("user_id"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("fuuids_versions_user_id".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from("path_cuuids"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("path_cuuids".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from("user_id"), direction: 1},
+            ChampIndex {nom_champ: String::from("type_node"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("user_id_type_node".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_TUUID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("fichiers_tuuid".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_SUPPRIME), direction: -1},
+            ChampIndex {nom_champ: String::from(CHAMP_SUPPRIME_INDIRECT), direction: -1},
+            ChampIndex {nom_champ: String::from(CHAMP_MODIFICATION), direction: -1},
+            ChampIndex {nom_champ: String::from(CHAMP_TUUID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("fichiers_activite_recente_2".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_SUPPRIME), direction: -1},
+            ChampIndex {nom_champ: String::from(CHAMP_FAVORIS), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("collections_favoris".to_string()), unique: false })
+    ).await?;
+
+    // Versions
+
+    db.create_index(
+        NOM_COLLECTION_VERSIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_FUUID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some(CHAMP_FUUID.to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VERSIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from("fuuids_reclames"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("fuuids_reclames".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VERSIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_FLAG_MEDIA_TRAITE), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_CREATION), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("flag_media_traite".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VERSIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_FLAG_VIDEO_TRAITE), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_CREATION), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("flag_video_traite".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VERSIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CONST_FIELD_LAST_VISIT_VERIFICATION), direction: 1},
+            ChampIndex {nom_champ: String::from("visites.nouveau"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("last_visits".to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VERSIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from(FIELD_TUUIDS), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("tuuids".to_string()), unique: false })
+    ).await?;
+
+    // Video jobs
+
+    db.create_index(
+        NOM_COLLECTION_VIDEO_JOBS,
+        vec!(
+            ChampIndex {nom_champ: String::from(FIELD_TUUID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_CLE_CONVERSION), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("tuuid_params".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VIDEO_JOBS,
+        vec!(
+            ChampIndex {nom_champ: String::from("job_id"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("job_id".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VIDEO_JOBS,
+        vec!(
+            ChampIndex {nom_champ: String::from("etat"), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_MODIFICATION), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_INSTANCES), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some(NOM_INDEX_ETAT_JOBS.to_string()), unique: false })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_VIDEO_JOBS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_TUUID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_USER_ID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some(NOM_INDEX_USER_ID_TUUIDS.to_string()), unique: false })
+    ).await?;
+
+    // User quotas
+
+    db.create_index(
+        NOM_COLLECTION_QUOTAS_USAGERS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_USER_ID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some(NOM_INDEX_USER_ID.to_string()), unique: true })
+    ).await?;
+
+    // Media
+
+    db.create_index(
+        NOM_COLLECTION_MEDIA,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_FUUID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_USER_ID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("fuuid_userid".to_string()), unique: true })
+    ).await?;
+
+    // File sharing
+
+    db.create_index(
+        NOM_COLLECTION_PARTAGE_CONTACT,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_CONTACT_ID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("contact_id".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_PARTAGE_COLLECTIONS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_CONTACT_ID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_TUUID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_USER_ID), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("user_collection".to_string()), unique: true })
+    ).await?;
+
+    // Jobs
+
+    db.create_index(
+        NOM_COLLECTION_JOBS_LEASES,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_TUUID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_USER_ID), direction: 1},
+            ChampIndex {nom_champ: String::from("borrower"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("lease_id".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_JOBS_VERSIONS_LEASES,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_FUUID), direction: 1},
+            ChampIndex {nom_champ: String::from("borrower"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("lease_id".to_string()), unique: true })
+    ).await?;
+
+    db.create_index(
+        NOM_COLLECTION_FILE_COMMENTS,
+        vec!(
+            ChampIndex {nom_champ: String::from(CHAMP_FUUID), direction: 1},
+            ChampIndex {nom_champ: String::from("comment_id"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("comment_id".to_string()), unique: true })
     ).await?;
 
     Ok(())
