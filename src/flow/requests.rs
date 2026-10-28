@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::bson;
 use millegrilles_common_rust::generateur_messages::{RoutageMessageAction, RoutingValidation};
 use crate::external::mongo_struct::{ContactRow, NodeFichierVersionOwned, RowPartagesUsager, StreamTokenRow};
-use crate::flow::sharing::{get_contacts_user, map_user_ids_nom_usager};
+use crate::flow::file_sharing::{get_contacts_user, get_shared_cuuids_by_userid, map_user_ids_nom_usager};
 use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
 
 pub async fn process_request<M>(
@@ -380,15 +380,35 @@ async fn request_files_by_tuuid<M>(
     user_ids.insert(user_id.clone());
     let shared = request.shared_contact_id.is_some() || request.shared == Some(true);
 
-    if shared {
-        todo!("share");
-    }
-
-    let user_ids: Vec<String> = user_ids.into_iter().collect();
-    let filter = doc! {
-        FIELD_TUUID: { "$in": &request.tuuids },
-        FIELD_USER_ID: { "$in": user_ids },
+    let allowed_cuuids = match shared {
+        true => {
+            debug!("request_files_by_tuuid Allow any shared collection for user_id: {}", user_id);
+            let allowed_cuuids = get_shared_cuuids_by_userid(
+                mongo,
+                user_id.as_str(),
+                None,
+                request.shared_contact_id.as_ref()
+            ).await?;
+            Some(allowed_cuuids)
+        },
+        false => None
     };
+
+    let mut filter = doc! { FIELD_TUUID: { "$in": &request.tuuids } };
+    match allowed_cuuids {
+        Some(cuuids) => {
+            // Filter on either authenticated user_id (local) or allowed parent folders (cuuids)
+            filter.insert("$or",  bson::serialize_to_bson(&vec![
+                doc!{ FIELD_USER_ID: &user_id },
+                doc!{ FIELD_TUUID: { "$in": &cuuids } },
+                doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
+            ])?);
+        },
+        None => {
+            // Filter on authenticated user_id
+            filter.insert(FIELD_USER_ID, &user_id);
+        }
+    }
 
     let (result, _) = get_complete_files(mongo, filter, None, None, None).await?;
     let files = result.fichiers;

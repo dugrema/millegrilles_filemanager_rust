@@ -15,4 +15,4 @@ pub mod file_events;
 pub mod file_jobs;
 mod access;
 mod transaction_legacy;
-mod sharing;
+mod file_sharing;
