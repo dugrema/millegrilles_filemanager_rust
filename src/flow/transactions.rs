@@ -1647,10 +1647,11 @@ async fn copy_files_collections(
     let user_id = transaction.user_id.clone();
 
     let mut insertions_filerep = Vec::with_capacity(transaction.entries.len());
-    let mut insertions_media = Vec::with_capacity(transaction.entries.len());
+    // let mut insertions_media = Vec::with_capacity(transaction.entries.len());
     let mut insertions_comments = Vec::with_capacity(transaction.entries.len());
 
     let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
     let mut models = Vec::new();
 
     for entry in transaction.entries {
@@ -1692,7 +1693,9 @@ async fn copy_files_collections(
         })?);
 
         if let Some(media) = entry.media {
-            insertions_media.push(bson::serialize_to_document(&MediaOwnedRow {
+            // Media is by user_id/fuuid. This is shared across all tuuids for the same user.
+            let filter_media = doc! { FIELD_FUUID: &media.fuuid, FIELD_USER_ID: &user_id };
+            let row = MediaOwnedRow {
                 fuuid: media.fuuid,
                 user_id: user_id.clone(),
                 created: created.clone(),
@@ -1707,7 +1710,20 @@ async fn copy_files_collections(
                 audio: media.audio,
                 subtitles: media.subtitles,
                 web_subtitles: media.web_subtitles,
-            })?);
+            };
+            let ops_media = doc!{
+                "$setOnInsert": bson::serialize_to_document(&row)?
+            };
+            models.push(
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(collection_media.namespace())
+                        .filter(filter_media)
+                        .update(ops_media)
+                        .upsert(true)
+                        .build()
+                )
+            );
         }
 
         if let Some(comments) = entry.comments {
@@ -1729,9 +1745,9 @@ async fn copy_files_collections(
     if ! insertions_filerep.is_empty() {
         vec_batches.push(BatchInsertions::new(NOM_COLLECTION_FICHIERS_REP, insertions_filerep));
     }
-    if ! insertions_media.is_empty() {
-        vec_batches.push(BatchInsertions::new(NOM_COLLECTION_MEDIA, insertions_media));
-    }
+    // if ! insertions_media.is_empty() {
+    //     vec_batches.push(BatchInsertions::new(NOM_COLLECTION_MEDIA, insertions_media));
+    // }
     if ! insertions_comments.is_empty() {
         vec_batches.push(BatchInsertions::new(NOM_COLLECTION_FILE_COMMENTS, insertions_comments));
     }
