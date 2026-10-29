@@ -156,7 +156,7 @@ pub async fn create_index_mongodb(db: &dyn MongoDao) -> Result<(), CommonError> 
     db.create_index(
         COLLECTION_NAME_TRACKING,
         vec!(
-            ChampIndex { nom_champ: String::from(FIELD_DATE_PROCESSED), direction: 1 },
+            ChampIndex { nom_champ: String::from(FIELD_PROCESSED), direction: 1 },
         ),
         Some(IndexOptions { nom_index: Some(String::from(INDEX_DATE_PROCESSED)), unique: false })
     ).await?;
