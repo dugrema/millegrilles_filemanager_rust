@@ -885,7 +885,9 @@ pub async fn maintain_file_jobs<M>(
 
     if run_maintain_leases {
         debug!("maintain_file_jobs run_maintain_leases");
-        // TODO run_cleanup_leases
+        if let Err(e) = run_cleanup_leases(mongo).await {
+            error!("maintain_file_jobs run_cleanup_leases Error: {:?}", e);
+        }
     }
 
     Ok(())
@@ -1299,5 +1301,21 @@ where M: MongoDaoTyped
         // Update visits in the versions tables
         sauvegarder_visites(mongo, fuuid_visits.fuuid.as_str(), &fuuid_visits.visits, &mut session).await?;
     }
+    Ok(())
+}
+
+async fn run_cleanup_leases<M>(
+    mongo: &M
+) -> Result<(), CommonError> where M: MongoDao {
+    // All file leases are expired after 1 hour
+    let expired = Utc::now() - Duration::hours(1);
+    let filtre = doc!{ "lease_date": { "$lt": expired } };
+
+    let collection = mongo.get_collection(NOM_COLLECTION_JOBS_LEASES)?;
+    collection.delete_many(filtre.clone()).await?;
+
+    let collection = mongo.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
+    collection.delete_many(filtre).await?;
+
     Ok(())
 }

@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use millegrilles_common_rust::bson;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
+use millegrilles_common_rust::chrono::{DateTime, Timelike, Utc};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::millegrilles_cryptographie::x509::EnveloppeCertificat;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
@@ -103,4 +105,34 @@ pub async fn verifier_acces_usager_media<M>(
 
     // String to_owned
     Ok(resultat.into_iter().map(|s| s.to_string()).collect())
+}
+
+/// Run maintenance on tokens and sessions
+pub async fn maintenance_access<M>(
+    mongo: &M,
+    trigger_date: Option<&DateTime<Utc>>
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+
+    let run_stream = match trigger_date {
+        Some(date) => {
+            let minutes = date.minute();
+
+            let run_stream = minutes % 30 == 21;
+
+            run_stream
+        },
+        None => true
+    };
+
+    let now = bson::datetime::DateTime::now();
+
+    if run_stream {
+        // Delete expired streaming tokens
+        let collection_stream_tokens = mongo.get_collection(NOM_COLLECTION_STREAM_TOKENS)?;
+        let filter_tokens = doc! { FIELD_EXPIRATION: { "&lt": &now } };
+        debug!("Deleting streaming tokens expired by {:?}", now);
+        collection_stream_tokens.delete_many(filter_tokens).await?;
+    }
+
+    Ok(())
 }

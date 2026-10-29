@@ -44,6 +44,7 @@ pub const FIELD_FUUIDS_VERSION_0: &str = "fuuids_versions.0";
 pub const FIELD_MIMETYPE: &str = "mimetype";
 pub const FIELD_METADATA: &str = "metadata";
 pub const FIELD_TOKEN: &str = "token";
+pub const FIELD_EXPIRATION: &str = "expiration";
 
 // Old fields
 

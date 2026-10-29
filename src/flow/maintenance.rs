@@ -15,6 +15,7 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::v3::{BackupService, ConfigService, PresenceService, TransactionService};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::flow::access::maintenance_access;
 use crate::flow::file_events::DelayedEventEmitterService;
 use crate::flow::file_jobs::maintain_file_jobs;
 
@@ -39,21 +40,21 @@ pub async fn process_ticker_job<M>(
     let minute = date.minute();
     let day = date.weekday();
 
-    debug!("process_ticker_job for h:{} m:{}",hour,minute);
+    // Dev flag makes all jobs run every minute
+    let is_dev = config.get_configuration_instance().dev;
+
+    debug!("process_ticker_job for h:{} m:{}, is_dev:{}", hour, minute, is_dev);
 
     // Emit domain presence
     if let Err(e) = outbound.emit_domain_presence(DOMAIN_NAME, None).await {
         warn!("Error emitting domain presence: {}", e);
     }
 
-    // Dev flag makes all jobs run every minute
-    let is_dev = config.get_configuration_instance().dev;
-
     let trigger_date = if is_dev {
-        Some(&date)
-    } else {
         debug!("process_ticker_job dev mode, running all jobs");
         None
+    } else {
+        Some(&date)
     };
 
     // Database maintenance
@@ -63,6 +64,10 @@ pub async fn process_ticker_job<M>(
     }
 
     if let Err(e) = maintain_file_jobs(transaction, mongo, outbound, trigger_date).await {
+        error!("Maintenance error when processing maintain_file_jobs: {:?}", e);
+    }
+
+    if let Err(e) = maintenance_access(mongo, trigger_date).await {
         error!("Maintenance error when processing maintain_file_jobs: {:?}", e);
     }
 
