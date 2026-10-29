@@ -39,22 +39,30 @@ pub async fn process_ticker_job<M>(
     let minute = date.minute();
     let day = date.weekday();
 
-    debug!("ticker_job_ca for h:{} m:{}",hour,minute);
+    debug!("process_ticker_job for h:{} m:{}",hour,minute);
 
     // Emit domain presence
     if let Err(e) = outbound.emit_domain_presence(DOMAIN_NAME, None).await {
         warn!("Error emitting domain presence: {}", e);
     }
 
-    // Database maintenance
-    let trigger_date = Some(&date);
-    // let trigger_date = None;  // For testing, use env var DEV=1 for same effect as None
+    // Dev flag makes all jobs run every minute
+    let is_dev = config.get_configuration_instance().dev;
 
-    if let Err(e) = maintain_visits_claims(config, transaction, mongo, outbound, delayed_event_emitter_service, trigger_date).await {
+    let trigger_date = if is_dev {
+        Some(&date)
+    } else {
+        debug!("process_ticker_job dev mode, running all jobs");
+        None
+    };
+
+    // Database maintenance
+
+    if let Err(e) = maintain_visits_claims(transaction, mongo, outbound, delayed_event_emitter_service, trigger_date).await {
         error!("Maintenance error when processing maintenance_visits_claims: {:?}", e);
     }
 
-    if let Err(e) = maintain_file_jobs(config, transaction, mongo, outbound, trigger_date).await {
+    if let Err(e) = maintain_file_jobs(transaction, mongo, outbound, trigger_date).await {
         error!("Maintenance error when processing maintain_file_jobs: {:?}", e);
     }
 

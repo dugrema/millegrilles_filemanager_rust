@@ -825,15 +825,11 @@ pub async fn reset_indexation(mongo: &dyn MongoDao, outbound: &MessageOutboundFa
 
 /// Regular maintenance of media jobs
 pub async fn maintain_file_jobs<M>(
-    config: &dyn ConfigService,
     transaction: &dyn TransactionService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     trigger_date: Option<&DateTime<Utc>>
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-
-    // Dev flag makes all jobs run every minute
-    let is_dev = config.get_configuration_instance().dev;
 
     let (
         run_impossible_jobs,
@@ -841,8 +837,8 @@ pub async fn maintain_file_jobs<M>(
         run_restart_jobs,
         run_maintain_leases,
         run_fetch_filehosts
-    ) = match (is_dev, trigger_date) {
-        (false, Some(date)) => {
+    ) = match trigger_date {
+        Some(date) => {
             let hours = date.hour();
             let minutes = date.minute();
 
@@ -854,7 +850,7 @@ pub async fn maintain_file_jobs<M>(
 
             (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases, run_fetch_filehosts)
         },
-        _ => (true, true, true, true, true)
+        None => (true, true, true, true, true)
     };
 
     if run_impossible_jobs {

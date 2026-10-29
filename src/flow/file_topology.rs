@@ -27,7 +27,6 @@ use millegrilles_common_rust::v3::{ConfigService, TransactionService};
 use crate::flow::transaction_models::PermanentlyDeleteFilesTransaction;
 
 pub async fn maintain_visits_claims<M>(
-    config: &dyn ConfigService,
     transaction: &dyn TransactionService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
@@ -35,11 +34,8 @@ pub async fn maintain_visits_claims<M>(
     trigger_date: Option<&DateTime<Utc>>
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
 
-    // Dev flag makes all jobs run every minute
-    let is_dev = config.get_configuration_instance().dev;
-
-    let (run_visits, run_claims, run_newfiles, run_deleted_files, run_quotas) = match (is_dev, trigger_date) {
-        (false, Some(date)) => {
+    let (run_visits, run_claims, run_newfiles, run_deleted_files, run_quotas) = match trigger_date {
+        Some(date) => {
             let hours = date.hour();
             let minutes = date.minute();
 
@@ -51,7 +47,7 @@ pub async fn maintain_visits_claims<M>(
 
             (run_visits, run_claims, run_newfiles, run_deleted_files, run_quotas)
         },
-        _ => (true, true, true, true, true)
+        None => (true, true, true, true, true)
     };
 
     if run_visits {
