@@ -838,14 +838,17 @@ pub async fn maintain_file_jobs<M>(
     };
 
     if run_impossible_jobs {
+        debug!("maintain_file_jobs run_impossible_jobs");
         // TODO maintenance_impossible_jobs
     }
 
     if run_missing_jobs {
+        debug!("maintain_file_jobs run_missing_jobs");
         // TODO create_missing_jobs
     }
 
     if run_restart_jobs {
+        debug!("maintain_file_jobs run_restart_jobs");
         // TODO entretien_jobs_expirees
 
         //         let fetch_filehosts = minutes == 2;  // Once an hour
@@ -855,6 +858,7 @@ pub async fn maintain_file_jobs<M>(
     }
 
     if run_maintain_leases {
+        debug!("maintain_file_jobs run_maintain_leases");
         // TODO run_cleanup_leases
     }
 

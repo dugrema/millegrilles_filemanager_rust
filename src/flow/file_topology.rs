@@ -1,4 +1,4 @@
-use crate::constants::COMMAND_CLAIM_FILEHOST_VISITS;
+use crate::constants::{COMMAND_CLAIM_FILEHOST_VISITS, DOMAIN_NAME, TRANSACTION_PERMANENTLY_DELETE_FILES};
 /// Module that handles interactions with CoreTopology and the file controler.
 /// This ensures files are claimed regularly to avoid being deleted. It also handles "visits" from
 /// the filecontroler for each file when they are emitted.
@@ -7,7 +7,7 @@ use crate::external::mongo::*;
 use crate::external::mongo_struct::NodeFichierRepOwned;
 use crate::flow::file_events::{DelayedEventEmitterService, declencher_traitement_nouveau_fuuid};
 use crate::models::TypeNode;
-use millegrilles_common_rust::bson;
+use millegrilles_common_rust::{bson, serde_json};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use millegrilles_common_rust::constantes::{DOMAINE_TOPOLOGIE, Securite};
@@ -23,8 +23,11 @@ use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use std::collections::{HashMap, HashSet};
+use millegrilles_common_rust::v3::TransactionService;
+use crate::flow::transaction_models::PermanentlyDeleteFilesTransaction;
 
 pub async fn maintain_visits_claims<M>(
+    transaction: &dyn TransactionService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     delayed_event_emitter_service: &DelayedEventEmitterService,
@@ -47,29 +50,38 @@ pub async fn maintain_visits_claims<M>(
     };
 
     if run_visits {
+        debug!("maintain_visits_claims run_visits");
         if let Err(e) = process_visits(mongo).await {
             error!("process_visits Error processing filehost visits log: {:?}", e);
         }
     }
 
     if run_claims {
+        debug!("maintain_visits_claims run_claims");
         if let Err(e) = claim_all_files(mongo, outbound).await {
             error!("process_visits Error processing filehost visits log: {:?}", e);
         }
     }
 
     if run_newfiles {
+        debug!("maintain_visits_claims run_newfiles");
         if let Err(e) = reclamer_fichiers(mongo, outbound, delayed_event_emitter_service).await {
             error!("process_visits Error processing filehost visits log: {:?}", e);
         }
     }
 
     if run_deleted_files {
-        // TODO maintain_deleted_files
+        debug!("maintain_visits_claims run_deleted_files");
+        if let Err(e) = maintain_deleted_files(transaction, mongo).await {
+            error!("process_visits Error processing filehost visits log: {:?}", e);
+        }
     }
 
     if run_quotas {
-        // TODO calculer_quotas
+        debug!("maintain_visits_claims run_quotas");
+        if let Err(e) = calculer_quotas(mongo).await {
+            error!("process_visits Error processing filehost visits log: {:?}", e);
+        }
     }
 
     Ok(())
@@ -596,6 +608,280 @@ async fn sauvegarder_fuuid_inconnu<M>(
         .update_many(filtre, ops)
         .session(&mut *session)
         .await?;
+
+    Ok(())
+}
+
+async fn maintain_deleted_files<M>(
+    transaction: &dyn TransactionService,
+    mongo: &M,
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    info!("maintain_deleted_files remove_expired_new_file_visits START");
+    if let Err(e) = remove_expired_new_file_visits(mongo).await {
+        error!("maintain_deleted_files Error during remove_expired_new_file_visits: {:?}", e);
+    }
+
+    info!("maintain_deleted_files maintain_delete_versions_fichiers START");
+    if let Err(e) = maintain_delete_versions_fichiers(mongo, transaction).await {
+        error!("maintain_deleted_files Error during maintain_delete_versions_fichiers: {:?}", e);
+    }
+
+    info!("maintain_deleted_files maintain_delete_fichiersrep START");
+    if let Err(e) = maintain_delete_fichiersrep(mongo, transaction).await {
+        error!("maintain_deleted_files Error during maintain_delete_fichiersrep: {:?}", e);
+    }
+
+    info!("maintain_deleted_files DONE");
+
+    Ok(())
+}
+
+async fn remove_expired_new_file_visits<M>(mongo: &M) -> Result<(), CommonError>
+where M: MongoDaoTyped
+{
+    let now = Utc::now();
+    let delai_expiration = Duration::hours(1);
+    let expiration = now - delai_expiration;
+
+    debug!("remove_expired_new_file_visits Remove new file visits (visites.nouveau, epoch {} and older)", expiration);
+
+    let filtre = doc!{
+        "$or": [
+            {"visites.nouveau": {"$lt": expiration}},
+            {"visites.nouveau": {"$lt": expiration.timestamp()}},   // Old epoch int format (obsolete)
+        ]
+    };
+    let ops = doc!{
+        "$unset": {"visites.nouveau": true},
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let result = collection.update_many(filtre, ops).await?;
+    debug!("remove_expired_new_file_visits Removed {} visistes.nouveau", result.modified_count);
+
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct FuuidRow { fuuid: String }
+
+async fn maintain_delete_versions_fichiers<M>(
+    mongo: &M,
+    transaction: &dyn TransactionService,
+) -> Result<(), CommonError>
+where M: MongoDaoTyped
+{
+    // Get up to 1000 fuuids that have already been deleted from filehosts
+    let filtre = doc!{
+        "$and": [
+            {"$or": [{"tuuids": []}, {"tuuids": null}]},
+            {"$or": [{"visites": {}}, {"visites": null}]},
+        ]
+    };
+    let projection = doc!{"fuuid": 1};
+    let collection_versions = mongo.get_collection_typed::<FuuidRow>(NOM_COLLECTION_VERSIONS)?;
+    let mut cursor = collection_versions
+        .find(filtre)
+        .projection(projection)
+        .limit(1000)
+        .await?;
+
+    const BATCH_SIZE: usize = 50;
+    let mut fuuids = Vec::with_capacity(BATCH_SIZE);
+
+    while let Some(row) = cursor.next().await {
+        let row = row?;
+        fuuids.push(row.fuuid.clone());
+
+        if fuuids.len() >= BATCH_SIZE {
+            let tuuids = find_deleted_tuuids_for_fuuids(mongo, &fuuids).await?;
+            let transaction_value = PermanentlyDeleteFilesTransaction {
+                tuuids,
+                fuuids: Some(fuuids),
+            };
+            debug!("maintain_delete_versions_fichiers: Transaction {:?}", transaction_value);
+            transaction.process_value(
+                DOMAIN_NAME,
+                TRANSACTION_PERMANENTLY_DELETE_FILES,
+                serde_json::to_value(&transaction_value)?,
+                None
+            ).await?;
+
+            fuuids = Vec::with_capacity(BATCH_SIZE);    // New batch
+        }
+    }
+
+    if fuuids.len() > 0 {
+        let tuuids = find_deleted_tuuids_for_fuuids(mongo, &fuuids).await?;
+        let transaction_value = PermanentlyDeleteFilesTransaction {
+            tuuids,
+            fuuids: Some(fuuids),
+        };
+        debug!("maintain_delete_versions_fichiers: Transaction {:?}", transaction_value);
+        transaction.process_value(
+            DOMAIN_NAME,
+            TRANSACTION_PERMANENTLY_DELETE_FILES,
+            serde_json::to_value(&transaction_value)?,
+            None
+        ).await?;
+    }
+
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct TuuidRow {tuuid: String}
+
+/// Deletes orphan fichierrep files and directory/collections.
+async fn maintain_delete_fichiersrep<M>(
+    mongo: &M,
+    transaction: &dyn TransactionService,
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let collection = mongo.get_collection_typed::<TuuidRow>(NOM_COLLECTION_FICHIERS_REP)?;
+    const BATCH_SIZE: usize = 100;
+    let mut session = mongo.get_session().await?;
+
+    // Used for batching transactions
+    let mut tuuids = Vec::with_capacity(BATCH_SIZE);
+
+    // Cleanup deleted files that are not associated to any file version (fuuids).
+    {
+        let filtre = doc!{
+            FIELD_NODE_TYPE: "Fichier",
+            FIELD_DELETED: true,
+            "fuuids_versions.0": {"$exists": false}
+        };
+        let mut cursor = collection
+            .find(filtre)
+            .projection(doc!{ "tuuid": 1 })
+            .limit(1000)
+            .await?;
+
+        while cursor.advance().await? {
+            let row = cursor.deserialize_current()?;
+            tuuids.push(row.tuuid);
+
+            if tuuids.len() >= BATCH_SIZE {
+                run_delete_tuuids_transaction(transaction, tuuids).await?;
+                tuuids = Vec::with_capacity(BATCH_SIZE);
+            }
+        }
+    }
+
+    // Directory/Collections
+    // Find any that are both supprime==true and have no remaining children nodes.
+    let pipeline = vec![
+        // Find deleted directories/collections
+        doc!{"$match": {"supprime": true, "type_node": {"$in": ["Repertoire", "Collection"]}}},
+        // Check if they have at least 1 child node
+        doc!{"$lookup": {
+            "from": NOM_COLLECTION_FICHIERS_REP,
+            "localField": "tuuid",
+            "foreignField": "path_cuuids.0",
+            "pipeline": [
+                {"$limit": 1},  // We don't need the exact count, a single entry is enough
+                {"$group": {"_id": "NONE", "count": {"$count": {}}}},
+            ],
+            "as": "children",
+        }},
+        doc!{"$match": {"children": []}},       // Only keep entries with no children
+        doc!{"$limit": 1000},
+        doc!{"$project": {"tuuid": 1}},
+        // doc!{"$out": "GrosFichiers/testDelete"},
+    ];
+    let mut cursor = collection.aggregate(pipeline).await?;
+
+    while cursor.advance().await? {
+        let row = cursor.deserialize_current()?;
+        let row: TuuidRow = bson::deserialize_from_document(row)?;
+        tuuids.push(row.tuuid);
+
+        if tuuids.len() >= BATCH_SIZE {
+            run_delete_tuuids_transaction(transaction, tuuids).await?;
+            tuuids = Vec::with_capacity(BATCH_SIZE);
+        }
+    }
+
+    if tuuids.len() > 0 {
+        run_delete_tuuids_transaction(transaction, tuuids).await?;
+    }
+
+    Ok(())
+}
+
+async fn find_deleted_tuuids_for_fuuids<M>(mongo: &M, fuuids: &Vec<String>) -> Result<Vec<String>, CommonError>
+where M: MongoDaoTyped
+{
+    let mut tuuids = Vec::with_capacity(fuuids.len());
+
+    let filtre_reps = doc! {"fuuids_versions": {"$in": fuuids}, "supprime": true};
+    let collection_fichiersreps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let mut cursor_reps = collection_fichiersreps.find(filtre_reps).await?;
+    while cursor_reps.advance().await? {
+        let row_fichierrep = cursor_reps.deserialize_current()?;
+        tuuids.push(row_fichierrep.tuuid);
+    }
+
+    Ok(tuuids)
+}
+
+async fn run_delete_tuuids_transaction(
+    transaction: &dyn TransactionService,
+    tuuids: Vec<String>
+) -> Result<(), CommonError> {
+    debug!("maintain_delete_fichiersrep Delete tuuids: {:?}", tuuids);
+    let transaction_value = PermanentlyDeleteFilesTransaction { tuuids, fuuids: None };
+    debug!("maintain_delete_fichiersrep: Transaction {:?}", transaction_value);
+
+    transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_PERMANENTLY_DELETE_FILES,
+        serde_json::to_value(&transaction_value)?,
+        None
+    ).await?;
+
+    Ok(())
+}
+
+pub async fn calculer_quotas<M>(mongo: &M) -> Result<(), CommonError> where M: MongoDaoTyped {
+    calculer_quotas_fichiers_usagers(mongo).await
+}
+
+/// Runs an aggregation operation that merges the quota values directly in the database.
+async fn calculer_quotas_fichiers_usagers<M>(mongo: &M) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let pipeline = vec! [
+        doc!{"$match": {"tuuids.0": {"$exists": true}}}, // Check if at least one tuuid is linked (means not deleted)
+        doc! { "$project": {"tuuids": 1, CHAMP_TAILLE: 1} },
+        doc! { "$lookup": {
+            // Lookup the rep table to get the user ids.
+            "from": NOM_COLLECTION_FICHIERS_REP,
+            "localField": CHAMP_TUUIDS,
+            "foreignField": CHAMP_TUUID,
+            "pipeline": [
+                // Check that the file is not deleted even tough the tuuids array should not contain deleted files.
+                {"$match": {CHAMP_SUPPRIME: false}},
+                {"$group": {"_id": "$user_id"}},
+            ],
+            "as": "users",
+        }},
+        doc! { "$unwind": {"path": "$users"} },  // Expand the users array to get a single user_id per row
+        doc! { "$project": {"users": 1, CHAMP_TAILLE: 1} },
+        doc!{"$group": {
+            "_id": "$users._id",
+            "bytes_total_versions": {"$sum": "$taille"},
+            "nombre_total_versions": {"$count": {}},
+        }},
+        doc! { "$addFields": {"user_id": "$_id", FIELD_DATE_MODIFIED: "$$NOW"} },
+        doc! { "$unset": "_id" },
+        doc!{"$merge": {
+            "into": NOM_COLLECTION_QUOTAS_USAGERS,
+            "on": "user_id",
+            "whenNotMatched": "insert",
+        }}
+    ];
+
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    collection_versions.aggregate(pipeline).await?;
 
     Ok(())
 }
