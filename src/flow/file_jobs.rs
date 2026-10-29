@@ -837,43 +837,26 @@ pub async fn maintain_file_jobs<M>(
         None => (true, true, true, true)
     };
 
-    // TODO: Complete job handling
+    if run_impossible_jobs {
+        // TODO maintenance_impossible_jobs
+    }
 
-    //     if hours % 3 == 2 && minutes == 27
-    //     {
-    //         // Remove media/indexation jobs that will never complete
-    //         info!("maintenance_impossible_jobs STARTING");
-    //         if let Err(e) = maintenance_impossible_jobs(middleware, gestionnaire).await {
-    //             error!("maintenance_impossible_jobs Error: {:?}", e);
-    //         }
-    //         info!("maintenance_impossible_jobs DONE");
-    //     }
-    //
-    //     if minutes % 30 == 13
-    //     {
-    //         info!("create_missing_jobs STARTING");
-    //         if let Err(e) = create_missing_jobs(middleware).await {  // Creer jobs media/indexation manquantes (recovery)
-    //             info!("create_missing_jobs Error: {:?}", e);
-    //         }
-    //         info!("create_missing_jobs DONE");
-    //     }
-    //
-    //     if minutes % 4 == 2
-    //     {
-    //         // Restart expired media jobs
-    //         info!("entretien_jobs_expirees STARTING");
-    //         let fetch_filehosts = minutes == 2;  // Once an hour
-    //         if let Err(e) = entretien_jobs_expirees(middleware, fetch_filehosts).await {
-    //             error!("entretien_jobs_expirees Error: {:?}", e);
-    //         }
-    //         info!("entretien_jobs_expirees DONE");
-    //     }
-    //
-    //     if hours % 3 == 2 && minutes == 9 {
-    //         if let Err(e) = run_cleanup_leases(middleware).await {
-    //             error!("run_cleanup_leases Error: {:?}", e);
-    //         }
-    //     }
+    if run_missing_jobs {
+        // TODO create_missing_jobs
+    }
+
+    if run_restart_jobs {
+        // TODO entretien_jobs_expirees
+
+        //         let fetch_filehosts = minutes == 2;  // Once an hour
+        //         if let Err(e) = entretien_jobs_expirees(middleware, fetch_filehosts).await {
+        //             error!("entretien_jobs_expirees Error: {:?}", e);
+        //         }
+    }
+
+    if run_maintain_leases {
+        // TODO run_cleanup_leases
+    }
 
     Ok(())
 }

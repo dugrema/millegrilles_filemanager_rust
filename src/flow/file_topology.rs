@@ -64,24 +64,13 @@ pub async fn maintain_visits_claims<M>(
         }
     }
 
-    //     if hours % 6 == 1 && minutes == 6
-    //     // if minutes % 5 == 1
-    //     {
-    //         if let Err(e) = maintain_deleted_files(middleware, gestionnaire).await {
-    //             error!("maintain_deleted_files Error: {:?}", e);
-    //         }
-    //     }
-    //
-    //     // Recalculer les quotas a toutes les 3 heures
-    //     if hours % 3 == 1 && minutes == 14
-    //     {
-    //         info!("calculer_quotas STARTING");
-    //         if let Err(e) = calculer_quotas(middleware).await {
-    //             error!("calculer_quotas Error: {:?}", e);
-    //         };
-    //         info!("calculer_quotas DONE");
-    //     }
+    if run_deleted_files {
+        // TODO maintain_deleted_files
+    }
 
+    if run_quotas {
+        // TODO calculer_quotas
+    }
 
     Ok(())
 }
