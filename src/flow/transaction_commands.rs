@@ -625,13 +625,13 @@ async fn associate_video_conversion<M>(
     }
 
     // Emettre fichier pour que tous les clients recoivent la mise a jour
-    if let Some(tuuid) = command.tuuid.as_ref() {
+    if let Some(tuuid) = command.tuuid.as_ref() && let Some(user_id) = command.user_id.as_ref() {
         if let Err(e) = emit_rep_update_event(
             mongo,
             outbound,
             delayed_event_emitter_service,
             tuuid.as_str(),
-            command.user_id.as_str()
+            user_id.as_str()
         ).await {
             warn!("commande_associer_video Erreur emettre_evenement_maj_fichier : {:?}", e);
         }

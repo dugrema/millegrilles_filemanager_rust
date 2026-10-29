@@ -155,7 +155,7 @@ pub struct TransactionDeleteFileComment {
 pub struct TransactionAssocierVideo {
     pub tuuid: Option<String>,
     pub fuuid: String,
-    pub user_id: String,
+    pub user_id: Option<String>,    // Keep optional for legacy transaction support
     pub mimetype: String,
     pub codec: String,
     pub fuuid_video: String,
