@@ -112,7 +112,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
 
             // Legacy but still required (no command associated)
             TRANSACTION_AJOUTER_FICHIERS_COLLECTION => legacy_ajouter_fichiers_collection(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_RECUPERER_DOCUMENTS => todo!("legacy"),
+            TRANSACTION_RECUPERER_DOCUMENTS => legacy_recuperer_documents(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DELETE_V2 => todo!("legacy"),
             TRANSACTION_SUPPRIMER_DOCUMENTS => legacy_supprimer_documents(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_VIDEO => todo!("legacy"),

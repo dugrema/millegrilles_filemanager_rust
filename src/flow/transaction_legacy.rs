@@ -10,7 +10,7 @@ use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::hachages::hacher_bytes;
-use millegrilles_common_rust::mongodb::options::Hint;
+use millegrilles_common_rust::mongodb::options::{Hint, UpdateManyModel, WriteModel};
 use millegrilles_common_rust::multibase::Base;
 use millegrilles_common_rust::multihash::Code;
 use millegrilles_common_rust::tokio_stream::StreamExt;
@@ -523,5 +523,64 @@ pub async fn legacy_supprimer_documents<M>(
     let ops = delete_file_reps_v3(mongo, wrapper_clone).await?;
     aggregator.merge(ops)?;
 
+    Ok(aggregator)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionListeDocuments {
+    pub tuuids: Vec<String>,  // Fichiers/rep a supprimer, archiver, etc
+}
+
+pub async fn legacy_recuperer_documents<M>(
+    mongo: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
+{
+    debug!("legacy_recuperer_documents id:{}", wrapper.message.id);
+    let transaction_collection: TransactionListeDocuments = wrapper.message.deserialize()?;
+
+    // Conserver champs transaction uniquement (filtrer champs meta)
+    let filtre = doc! { FIELD_TUUID: { "$in": &transaction_collection.tuuids } };
+    let ops = doc! {
+        "$set": { FIELD_DELETED: false },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+
+    let mut models = Vec::new();
+
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection_reps.namespace())
+                .filter(filtre)
+                .update(ops)
+                .build()
+        )
+    );
+
+    // Put the tuuid back in versions
+    let collection_versions = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let filtre = doc! { FIELD_TUUID: { "$in": &transaction_collection.tuuids }, FIELD_NODE_TYPE: TypeNode::Fichier.to_str() };
+    let mut cursor = collection_reps.find(filtre.clone()).await?;
+    while let Some(row) = cursor.next().await {
+        let row = cursor.deserialize_current()?;
+        if let Some(fuuids) = row.fuuids_versions {
+            let filtre_versions = doc! { FIELD_FUUID: { "$in": fuuids } };
+            let ops = doc! { "$addToSet": { FIELD_TUUIDS: row.tuuid }, "$currentDate": { FIELD_DATE_MODIFIED: true } };
+            models.push(
+                WriteModel::UpdateMany(
+                    UpdateManyModel::builder()
+                        .namespace(collection_versions.namespace())
+                        .filter(filtre_versions)
+                        .update(ops)
+                        .build()
+                )
+            );
+        }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
     Ok(aggregator)
 }
