@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use millegrilles_common_rust::bson;
+use millegrilles_common_rust::{bson, serde_json};
 use millegrilles_common_rust::bson::{doc, Document};
 use millegrilles_common_rust::chrono::{DateTime, Duration, Timelike, Utc};
 use millegrilles_common_rust::constantes::{Securite, DOMAINE_RELAIWEB};
@@ -15,13 +15,18 @@ use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
 use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
+use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::v3::models::ErrorMessage;
+use millegrilles_common_rust::v3::TransactionService;
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::external::mq::EVENT_FILES_TO_INDEX;
+use crate::external::mq::*;
 use crate::flow::keys::convert_decrypted_key_into_v2;
 use crate::flow::request_models::FileCommentResponse;
+use crate::flow::transaction_models::*;
+
+const CONST_MAX_RETRY: i32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BackgroundJobParams {
@@ -704,7 +709,7 @@ pub async fn set_flag_index_traite(mongo: &dyn MongoDao, tuuid: &str) -> Result<
         "$set": { CHAMP_FLAG_INDEX: true },
         "$currentDate": { FIELD_DATE_MODIFIED: true },
     };
-    collection.update_many(filtre, ops).await?;
+    collection.update_one(filtre, ops).await?;
     Ok(())
 }
 
@@ -818,9 +823,11 @@ pub async fn reset_indexation(mongo: &dyn MongoDao, outbound: &MessageOutboundFa
 
 /// Regular maintenance of media jobs
 pub async fn maintain_file_jobs<M>(
+    transaction: &dyn TransactionService,
     mongo: &M,
+    outbound: &MessageOutboundFacade,
     trigger_date: Option<&DateTime<Utc>>
-) -> Result<(), CommonError> {
+) -> Result<(), CommonError> where M: MongoDaoTyped {
 
     let (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases) = match trigger_date {
         Some(date) => {
@@ -839,12 +846,16 @@ pub async fn maintain_file_jobs<M>(
 
     if run_impossible_jobs {
         debug!("maintain_file_jobs run_impossible_jobs");
-        // TODO maintenance_impossible_jobs
+        if let Err(e) = remove_impossible_jobs(transaction, mongo, NOM_COLLECTION_VIDEO_JOBS, 1_000, "processVideo").await {
+            error!("maintain_file_jobs Error processing remove_impossible_jobs: {:?}", e);
+        }
     }
 
     if run_missing_jobs {
-        debug!("maintain_file_jobs run_missing_jobs");
-        // TODO create_missing_jobs
+        debug!("maintain_file_jobs create_missing_jobs_media");
+        if let Err(e) = create_missing_jobs_media(mongo, outbound, NOM_COLLECTION_VIDEO_JOBS, CHAMP_FLAG_VIDEO_TRAITE).await {
+            error!("maintain_file_jobs Error processing create_missing_jobs_media: {:?}", e);
+        }
     }
 
     if run_restart_jobs {
@@ -860,6 +871,269 @@ pub async fn maintain_file_jobs<M>(
     if run_maintain_leases {
         debug!("maintain_file_jobs run_maintain_leases");
         // TODO run_cleanup_leases
+    }
+
+    Ok(())
+}
+
+/// Deactivates for good jobs that have never been picked up or that have too many retries.
+pub async fn remove_impossible_jobs<M>(
+    transaction: &dyn TransactionService,
+    mongo: &M,
+    nom_collection: &str,
+    limit: i64,
+    action: &str,
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+
+    let expiration = Utc::now() - Duration::hours(8);
+    let collection = mongo.get_collection_typed::<BackgroundJob>(nom_collection)?;
+    let filtre = doc!{
+        "$or": [
+            {"retry": {"$gt": CONST_MAX_RETRY}},  // Any job with retry > CONST_MAX_RETRY
+            { FIELD_DATE_MODIFIED: {"$lte": expiration} },
+        ]
+    };
+    // info!("remove_impossible_jobs Collection {} action {}, Filtre: {:?}", nom_collection, action, filtre);
+
+    let mut curseur = collection
+        .find(filtre)
+        .limit(limit)
+        .await?;
+    while let Some(row) = curseur.next().await {
+        let row = row?;
+
+        // Cancel the job, emit a transaction to clear for good
+        warn!("remove_impossible_jobs Too many processing failures of type {} on fuuid {:?}, remove job", action, row.fuuid);
+        match action {
+            "processImage" => {
+                match row.fuuid.as_ref() {
+                    Some(fuuid) => {
+                        // Create transaction to prevent job from running on restore.
+                        let transaction_value = TransactionSupprimerJobImageV2 {
+                            // tuuid: row.tuuid,
+                            fuuid: fuuid.to_owned(),
+                            // err: None,
+                        };
+                        transaction.process_value(
+                            DOMAIN_NAME,
+                            TRANSACTION_IMAGE_SUPPRIMER_JOB_V2,
+                            serde_json::to_value(&transaction_value)?,
+                            None
+                        ).await?;
+                    },
+                    None => {
+                        warn!("remove_impossible_jobs Job image tuuid:{} with no fuuid, ignore", row.tuuid);
+                    }
+                }
+            },
+            "processVideo" => {
+                match row.fuuid.as_ref() {
+                    Some(fuuid) => {
+                        // Create transaction to prevent job from running on restore.
+                        let transaction_value = TransactionSupprimerJobVideoV2 {
+                            tuuid: row.tuuid,
+                            fuuid: fuuid.to_owned(),
+                            job_id: row.job_id.clone(),
+                        };
+                        info!("remove_impossible_jobs Remove video job {:?}", transaction_value);
+                        transaction.process_value(
+                            DOMAIN_NAME,
+                            TRANSACTION_VIDEO_DELETE_JOB_V2,
+                            serde_json::to_value(&transaction_value)?,
+                            None
+                        ).await?;
+                    },
+                    None => {
+                        warn!("remove_impossible_jobs Job video tuuid:{} with no fuuid, ignore", row.tuuid);
+                    }
+                }
+            },
+            "processIndex" => {
+                // Toggle index flag in reps/versions collections. There are no transactions for indexing.
+                set_flag_index_traite(mongo, row.tuuid.as_str()).await?;
+            },
+            _ => warn!("remove_impossible_jobs Unknown expired job type: {}", action)
+        }
+
+        // Ensure job removal
+        let filtre = doc!{ "job_id": &row.job_id };
+        collection.delete_one(filtre).await?;
+    }
+
+    Ok(())
+}
+
+#[derive(Deserialize, Debug)]
+struct MissingMediaJobMapping {
+    // fuuid: String,
+    version: NodeFichierVersionOwned,
+    fichierreps: Vec<NodeFichierRepOwned>,
+    // jobs: Vec<BackgroundJob>,
+}
+
+async fn create_missing_jobs_media<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    jobs_collection_name: &str,
+    flag_job: &str
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let collection_version = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let collection_jobs = mongo.get_collection_typed::<BackgroundJob>(jobs_collection_name)?;
+
+    // Remove all file indexing jobs with empty filehosts ([]). They will get recreated.
+    let filtre_empty = doc! { "filehost_ids.0": {"$exists": false} };
+    collection_jobs.delete_many(filtre_empty).await?;
+
+    let pipeline = vec![
+        // Find file versions that are not processed and not deleted (at least 1 tuuid).
+        doc! { "$match": {flag_job: false, format!("{}.0", CHAMP_TUUIDS): {"$exists": true}} },
+        // Restructure to keep version structure intact for mapping
+        doc! { "$replaceRoot": {"newRoot": {"_id": "$fuuid", "version": "$$ROOT"}}},
+        doc! { "$addFields": {"fuuid": "$version.fuuid"} },  // Copy fuuid back to root for easier troubleshooting
+        doc! { "$lookup": {
+            "from": jobs_collection_name,
+            "localField": "version.fuuid",
+            "foreignField": "fuuid",
+            "as": "jobs",
+        }},
+        // Filter out files that already have a job
+        doc! { "$match": {"jobs.0": {"$exists": false} } },
+        // Get fichiersrep when present
+        doc! { "$lookup": {
+            "from": NOM_COLLECTION_FICHIERS_REP,
+            "localField": "version.fuuid",
+            "foreignField": "fuuids_versions",
+            "as": "fichierreps",
+        }},
+    ];
+    debug!("create_missing_jobs_media Pipeline: {:?}", pipeline);
+
+    let mut batch = Vec::with_capacity(50);
+    let mut cursor = collection_version.aggregate(pipeline).await?;
+    while cursor.advance().await? {
+        let row = cursor.deserialize_current()?;
+        let fuuid = row.get_str("fuuid")?.to_owned();  // Keep tuuid in case of error
+        let row: MissingMediaJobMapping = match bson::deserialize_from_document(row) {
+            Ok(inner) => inner,
+            Err(e) => {
+                warn!("create_missing_jobs_media Mapping error on version entry tuuid:{} - SKIPPING: {:?}", fuuid, e);
+                continue
+            }
+        };
+        let fichier_version = row.version;
+
+        let fuuid = fichier_version.fuuid.as_str();
+
+        let visites: Vec<&String> = fichier_version.visites.keys().collect();
+
+        // Ensure the "nouveau" visit is not counted
+        let visites = visites
+            .into_iter()
+            .filter(|v| v.as_str() != "nouveau")  // New just created file, assume not ready
+            .map(|v| v.as_str())
+            .collect();
+
+        for fichier_rep in row.fichierreps {
+            let tuuid = fichier_rep.tuuid.as_str();
+            let user_id = fichier_rep.user_id.as_str();
+
+            let mimetype = match fichier_rep.mimetype {
+                Some(inner) => inner,
+                None => fichier_version.mimetype.clone()
+            };
+
+            // Produce the job information.
+            // Legacy support for old keys that contained decryption information (nonce, format).
+            let mut job = match (
+                fichier_version.cle_id.as_ref(),
+                fichier_version.format.as_ref(),
+                fichier_version.nonce.as_ref())
+            {
+                (Some(cle_id), Some(format), Some(nonce)) => {
+                    let format_str: &str = format.into();
+                    let mut job = BackgroundJob::new(
+                        tuuid,
+                        fuuid,
+                        mimetype.as_str(),
+                        &visites,
+                        cle_id.as_str(),
+                        format_str,
+                        nonce.as_str(),
+                    );
+                    job.user_id = Some(user_id.to_string());
+                    job
+                },
+                _ => {
+                    debug!("Key information for fuuid:{} missing from version, fetch from key", fuuid);
+                    // Old format. The keymaster has the key where cle_id == fuuid.
+                    let cle_id = fuuid;
+
+                    // Values for format and header (nonce) are available directly from the key.
+                    let mut key_information = outbound.get_keys(DOMAIN_NAME, vec![cle_id.to_string()], None).await?;
+                    if key_information.len() == 1 {
+                        let key = key_information.pop().expect("pop key_information");
+                        match (key.key.format.as_ref(), key.key.nonce.as_ref()) {
+                            (Some(format), Some(nonce)) => {
+                                let format_str: &str = format.into();
+                                let job = BackgroundJob::new(
+                                    tuuid,
+                                    fuuid,
+                                    mimetype.as_str(),
+                                    &visites,
+                                    cle_id,
+                                    format_str,
+                                    nonce.to_string().as_str()
+                                );
+                                job
+                            },
+                            _ => {
+                                warn!("Key information missing from keymaster for fuuid: {}", fuuid);
+                                continue
+                            }
+                        }
+                    } else {
+                        warn!("Key information missing from keymaster for fuuid: {}", fuuid);
+                        continue
+                    }
+                }
+            };
+
+            if flag_job == CHAMP_FLAG_VIDEO_TRAITE {
+                // Champs supplementaires pour video
+                let params_initial = BackgroundJobParams {
+                    defaults: Some(true),
+                    thumbnails: Some(true),
+                    mimetype: None,
+                    codec_video: None,
+                    codec_audio: None,
+                    resolution_video: None,
+                    quality_video: None,
+                    bitrate_video: None,
+                    bitrate_audio: None,
+                    preset: None,
+                    audio_stream_idx: None,
+                    subtitle_stream_idx: None,
+                };
+                job.params = Some(params_initial);
+            }
+            job.user_id = Some(user_id.to_string());
+
+            batch.push(job);
+
+            if batch.len() >= 50 {
+                // Save batch to database
+                debug!("Saving batch of media jobs");
+                collection_jobs.insert_many(&batch).await?;
+                batch.clear();
+            }
+        }
+
+        if batch.len() > 0 {
+            // Save batch to database
+            debug!("Saving last batch of media jobs");
+            collection_jobs.insert_many(&batch).await?;
+            batch.clear();
+        }
     }
 
     Ok(())

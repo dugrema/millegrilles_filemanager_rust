@@ -61,7 +61,7 @@ pub const TRANSACTION_SUPPRIMER_VIDEO_V2: &str = "supprimerVideoV2";
 pub const TRANSACTION_IMAGE_SUPPRIMER_JOB: &str = "supprimerJobImage";
 pub const TRANSACTION_IMAGE_SUPPRIMER_JOB_V2: &str = "supprimerJobImageV2";
 pub const TRANSACTION_VIDEO_SUPPRIMER_JOB: &str = "supprimerJobVideo";
-pub const COMMAND_VIDEO_DELETE_JOB_V2: &str = "supprimerJobVideoV2";
+pub const TRANSACTION_VIDEO_DELETE_JOB_V2: &str = "supprimerJobVideoV2";
 pub const COMMAND_CONFIRMER_FICHIER_INDEXE: &str = "confirmerFichierIndexe";
 pub const TRANSACTION_AJOUTER_CONTACT_LOCAL: &str = "ajouterContactLocal";
 pub const TRANSACTION_SUPPRIMER_CONTACTS: &str = "supprimerContacts";
@@ -264,8 +264,8 @@ pub fn init_queues(mq: &MessagingServiceImpl) -> Result<(), CommonError> {
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_IMAGE_SUPPRIMER_JOB_V2), exchange: Securite::L2Prive },
 
                 // Special case - some of these commands get turned into transactions (for default video creation)
-                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_VIDEO_DELETE_JOB_V2), exchange: Securite::L2Prive },
-                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, COMMAND_VIDEO_DELETE_JOB_V2), exchange: Securite::L3Protege },
+                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_VIDEO_DELETE_JOB_V2), exchange: Securite::L2Prive },
+                ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_VIDEO_DELETE_JOB_V2), exchange: Securite::L3Protege },
 
                 ConfigRoutingExchange { routing_key: format!("commande.{}.{}", DOMAIN_NAME, TRANSACTION_FILE_SUMMARY), exchange: Securite::L3Protege },
             ],

@@ -53,7 +53,7 @@ pub async fn process_ticker_job<M>(
         error!("Maintenance error when processing maintenance_visits_claims: {:?}", e);
     }
 
-    if let Err(e) = maintain_file_jobs(mongo, trigger_date).await {
+    if let Err(e) = maintain_file_jobs(transaction, mongo, outbound, trigger_date).await {
         error!("Maintenance error when processing maintain_file_jobs: {:?}", e);
     }
 

@@ -96,7 +96,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(self.mongo.as_ref(), wrapper, true).await,
             TRANSACTION_SUPPRIMER_VIDEO_V2 => delete_video(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => delete_image_job(self.mongo.as_ref(), wrapper).await,
-            COMMAND_VIDEO_DELETE_JOB_V2 => delete_video_job(self.mongo.as_ref(), wrapper).await,
+            TRANSACTION_VIDEO_DELETE_JOB_V2 => delete_video_job(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(self.mongo.as_ref(), wrapper).await,
 
