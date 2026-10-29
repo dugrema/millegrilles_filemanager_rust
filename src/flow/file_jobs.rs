@@ -18,7 +18,7 @@ use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chron
 use millegrilles_common_rust::mongodb::{ClientSession, Collection};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::v3::models::ErrorMessage;
-use millegrilles_common_rust::v3::TransactionService;
+use millegrilles_common_rust::v3::{ConfigService, TransactionService};
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
@@ -825,11 +825,15 @@ pub async fn reset_indexation(mongo: &dyn MongoDao, outbound: &MessageOutboundFa
 
 /// Regular maintenance of media jobs
 pub async fn maintain_file_jobs<M>(
+    config: &dyn ConfigService,
     transaction: &dyn TransactionService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     trigger_date: Option<&DateTime<Utc>>
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
+
+    // Dev flag makes all jobs run every minute
+    let is_dev = config.get_configuration_instance().dev;
 
     let (
         run_impossible_jobs,
@@ -837,8 +841,8 @@ pub async fn maintain_file_jobs<M>(
         run_restart_jobs,
         run_maintain_leases,
         run_fetch_filehosts
-    ) = match trigger_date {
-        Some(date) => {
+    ) = match (is_dev, trigger_date) {
+        (false, Some(date)) => {
             let hours = date.hour();
             let minutes = date.minute();
 
@@ -850,7 +854,7 @@ pub async fn maintain_file_jobs<M>(
 
             (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases, run_fetch_filehosts)
         },
-        None => (true, true, true, true, true)
+        _ => (true, true, true, true, true)
     };
 
     if run_impossible_jobs {

@@ -23,18 +23,23 @@ use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use std::collections::{HashMap, HashSet};
-use millegrilles_common_rust::v3::TransactionService;
+use millegrilles_common_rust::v3::{ConfigService, TransactionService};
 use crate::flow::transaction_models::PermanentlyDeleteFilesTransaction;
 
 pub async fn maintain_visits_claims<M>(
+    config: &dyn ConfigService,
     transaction: &dyn TransactionService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     delayed_event_emitter_service: &DelayedEventEmitterService,
     trigger_date: Option<&DateTime<Utc>>
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    let (run_visits, run_claims, run_newfiles, run_deleted_files, run_quotas) = match trigger_date {
-        Some(date) => {
+
+    // Dev flag makes all jobs run every minute
+    let is_dev = config.get_configuration_instance().dev;
+
+    let (run_visits, run_claims, run_newfiles, run_deleted_files, run_quotas) = match (is_dev, trigger_date) {
+        (false, Some(date)) => {
             let hours = date.hour();
             let minutes = date.minute();
 
@@ -46,7 +51,7 @@ pub async fn maintain_visits_claims<M>(
 
             (run_visits, run_claims, run_newfiles, run_deleted_files, run_quotas)
         },
-        None => (true, true, true, true, true)
+        _ => (true, true, true, true, true)
     };
 
     if run_visits {

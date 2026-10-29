@@ -12,13 +12,14 @@ use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
-use millegrilles_common_rust::v3::{BackupService, PresenceService, TransactionService};
+use millegrilles_common_rust::v3::{BackupService, ConfigService, PresenceService, TransactionService};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::flow::file_events::DelayedEventEmitterService;
 use crate::flow::file_jobs::maintain_file_jobs;
 
 pub async fn process_ticker_job<M>(
+    config: &dyn ConfigService,
     transaction: &dyn TransactionService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
@@ -46,14 +47,14 @@ pub async fn process_ticker_job<M>(
     }
 
     // Database maintenance
-    // let trigger_date = Some(&date);
-    let trigger_date = None;  // For testing
+    let trigger_date = Some(&date);
+    // let trigger_date = None;  // For testing, use env var DEV=1 for same effect as None
 
-    if let Err(e) = maintain_visits_claims(transaction, mongo, outbound, delayed_event_emitter_service, trigger_date).await {
+    if let Err(e) = maintain_visits_claims(config, transaction, mongo, outbound, delayed_event_emitter_service, trigger_date).await {
         error!("Maintenance error when processing maintenance_visits_claims: {:?}", e);
     }
 
-    if let Err(e) = maintain_file_jobs(transaction, mongo, outbound, trigger_date).await {
+    if let Err(e) = maintain_file_jobs(config, transaction, mongo, outbound, trigger_date).await {
         error!("Maintenance error when processing maintain_file_jobs: {:?}", e);
     }
 
