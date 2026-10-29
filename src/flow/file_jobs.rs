@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use millegrilles_common_rust::{bson, serde_json};
 use millegrilles_common_rust::bson::{doc, Document};
 use millegrilles_common_rust::chrono::{DateTime, Duration, Timelike, Utc};
-use millegrilles_common_rust::constantes::{Securite, DOMAINE_RELAIWEB};
+use millegrilles_common_rust::constantes::*;
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::jwt_simple::prelude::{Deserialize, Serialize};
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
@@ -15,6 +15,7 @@ use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
 use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
+use millegrilles_common_rust::mongodb::{ClientSession, Collection};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::TransactionService;
@@ -22,6 +23,7 @@ use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
+use crate::flow::file_topology::sauvegarder_visites;
 use crate::flow::keys::convert_decrypted_key_into_v2;
 use crate::flow::request_models::FileCommentResponse;
 use crate::flow::transaction_models::*;
@@ -829,7 +831,13 @@ pub async fn maintain_file_jobs<M>(
     trigger_date: Option<&DateTime<Utc>>
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
 
-    let (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases) = match trigger_date {
+    let (
+        run_impossible_jobs,
+        run_missing_jobs,
+        run_restart_jobs,
+        run_maintain_leases,
+        run_fetch_filehosts
+    ) = match trigger_date {
         Some(date) => {
             let hours = date.hour();
             let minutes = date.minute();
@@ -838,10 +846,11 @@ pub async fn maintain_file_jobs<M>(
             let run_missing_jobs = minutes % 30 == 13;
             let run_restart_jobs = minutes % 4 == 2;
             let run_maintain_leases = hours % 3 == 2 && minutes == 9;
+            let run_fetch_filehosts = minutes == 2;
 
-            (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases)
+            (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases, run_fetch_filehosts)
         },
-        None => (true, true, true, true)
+        None => (true, true, true, true, true)
     };
 
     if run_impossible_jobs {
@@ -859,13 +868,19 @@ pub async fn maintain_file_jobs<M>(
     }
 
     if run_restart_jobs {
-        debug!("maintain_file_jobs run_restart_jobs");
-        // TODO entretien_jobs_expirees
-
-        //         let fetch_filehosts = minutes == 2;  // Once an hour
-        //         if let Err(e) = entretien_jobs_expirees(middleware, fetch_filehosts).await {
-        //             error!("entretien_jobs_expirees Error: {:?}", e);
-        //         }
+        debug!("maintain_file_jobs run_restart_jobs (fetch_filehosts?: {})", run_fetch_filehosts);
+        if let Err(e) = reactiver_jobs(
+            mongo,
+            outbound,
+            NOM_COLLECTION_VIDEO_JOBS,
+            600,
+            100,
+            "media",
+            "processVideo",
+            run_fetch_filehosts
+        ).await {
+            error!("entretien_jobs_expirees Error: {:?}", e);
+        }
     }
 
     if run_maintain_leases {
@@ -1136,5 +1151,153 @@ async fn create_missing_jobs_media<M>(
         }
     }
 
+    Ok(())
+}
+
+/// Resubmits a batch of pending jobs to queue. Reactivates running jobs that have expired.
+pub async fn reactiver_jobs<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    nom_collection: &str,
+    timeout: i64,
+    limit: i64,
+    domain: &str,
+    action: &str,
+    fetch_filehosts: bool
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    let collection = mongo.get_collection_typed::<BackgroundJob>(nom_collection)?;
+
+    // Reset le flag des jobs expirees
+    let expiration = Utc::now() - Duration::seconds(timeout);
+    let filtre = doc!{"etat": VIDEO_CONVERSION_ETAT_RUNNING, "date_maj": {"$lte": expiration}};
+    let ops = doc!{
+        "$set": {"etat": VIDEO_CONVERSION_ETAT_PENDING},
+        "$inc": {"retry": 1},
+    };
+    let result = collection.update_many(filtre.clone(), ops).await?;
+    info!("reactiver_jobs Collection {}, {} filter: {:?}, result {:?}", nom_collection, action, filtre, result);
+
+    let filtre = doc!{"etat": VIDEO_CONVERSION_ETAT_PENDING, "retry": {"$lte": CONST_MAX_RETRY}};
+
+    // Resubmit jobs - duplicates in the Q will be caught when requesting job decryption key
+    let mut fuuids = Vec::new();
+    let mut curseur = collection
+        .find(filtre)
+        .limit(limit)
+        .await?;
+    while let Some(row) = curseur.next().await {
+        let row = row?;
+        if let Some(fuuid) = row.fuuid.as_ref() {
+            fuuids.push(fuuid.to_owned());
+        }
+
+        let mut metadata = None;    // Anchor, allows setting reference in JobTrigger
+        let trigger: JobTrigger = match action {
+            "processIndex" => {
+                let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+                let filtre = doc!{ FIELD_TUUID: &row.tuuid };
+                match collection.find_one(filtre).await? {
+                    Some(fichier) => {
+                        let mut trigger = JobTrigger::from(&row);
+                        metadata = Some(fichier.metadata);
+                        trigger.metadata = metadata.as_ref();
+                        trigger.path_cuuids = fichier.path_cuuids;
+                        trigger
+                    },
+                    None => {
+                        // Cleanup job pour fichier inconnu
+                        let filtre = doc!{ "job_id": &row.job_id };
+                        collection.delete_one(filtre).await?;
+                        Err(CommonError::String(format!("reactiver_jobs Fichier inconnu tuuid (job maintenant supprimee):{}", row.tuuid)))?
+                    }
+                }
+            },
+            _ => (&row).into()
+        };
+
+        emettre_processing_trigger(outbound, trigger, domain, action).await;
+    }
+
+    debug!("reactiver_jobs Job collection {}, fuuids: {}", nom_collection, fuuids.len());
+
+    // Synchronise with core in case some files were received without GrosFichiers being notified.
+    if ! fuuids.is_empty() && fetch_filehosts {
+        if let Err(e) = sync_jobs_core_filehosts(mongo, outbound, nom_collection, &fuuids).await {
+            warn!("reactiver_jobs Error sync jobs with fuuids in core: {:?}", e);
+        }
+    }
+
+    Ok(())
+}
+
+
+#[derive(Deserialize)]
+pub struct FuuidVisitResponseItem {pub fuuid: String, pub visits: HashMap<String, i64>}
+
+#[derive(Serialize)]
+struct RequestFilehostsForFuuids<'a> {
+    fuuids: &'a Vec<String>
+}
+
+#[derive(Deserialize)]
+struct ResponseFilehostsForFuuids {
+    fuuids: Vec<FuuidVisitResponseItem>
+}
+
+async fn sync_jobs_core_filehosts<M>(
+    mongo: &M,
+    outbound: &MessageOutboundFacade,
+    nom_collection: &str,
+    fuuids: &Vec<String>
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    debug!("Sync filehost_ids for {} fuuids", fuuids.len());
+    let routage = RoutageMessageAction::builder(
+        DOMAINE_TOPOLOGIE,
+        "requestFilehostsForFuuids",
+        vec![Securite::L3Protege]
+    ).build();
+    let request = RequestFilehostsForFuuids { fuuids };
+    let response = outbound.send_request(routage, request).await?;
+
+    if let (true, e) = response.is_err()? {
+        return Err(CommonError::String(format!("sync_jobs_core_filehosts Error in requestFilehostsForFuuids: {:?}", e)))
+    }
+
+    let response: ResponseFilehostsForFuuids = response.message.deserialize()?;
+
+    let collection_jobs = mongo.get_collection(nom_collection)?;
+    let mut session = mongo.get_session().await?;
+    session.start_transaction().await?;
+    match sync_jobs_save_visits(mongo, response, collection_jobs, &mut session).await {
+        Ok(_) => {
+            session.commit_transaction().await?;
+        },
+        Err(e) => {
+            session.abort_transaction().await?;
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+async fn sync_jobs_save_visits<M>(
+    mongo: &M,
+    response: ResponseFilehostsForFuuids,
+    collection_jobs: Collection<Document>,
+    mut session: &mut ClientSession
+) -> Result<(), CommonError>
+where M: MongoDaoTyped
+{
+    for fuuid_visits in response.fuuids {
+        // Update the jobs table
+        let filehost_ids: Vec<&String> = fuuid_visits.visits.keys().collect();
+        let filtre = doc! {"fuuid": &fuuid_visits.fuuid};
+        let ops = doc! {"$addToSet": {"filehost_ids": {"$each": filehost_ids}}, "$currentDate": {CHAMP_MODIFICATION: true}};
+        collection_jobs.update_many(filtre.clone(), ops).await?;
+
+        // Update visits in the versions tables
+        sauvegarder_visites(mongo, fuuid_visits.fuuid.as_str(), &fuuid_visits.visits, &mut session).await?;
+    }
     Ok(())
 }

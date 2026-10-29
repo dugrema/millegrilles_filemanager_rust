@@ -554,7 +554,7 @@ async fn verifier_visites_nouvelles<M>(
     Ok(())
 }
 
-async fn sauvegarder_visites<M>(
+pub async fn sauvegarder_visites<M>(
     mongo: &M,
     fuuid: &str,
     visites: &HashMap<String, i64>,
