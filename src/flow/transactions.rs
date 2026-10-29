@@ -24,6 +24,7 @@ use millegrilles_common_rust::bson;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use millegrilles_common_rust::constantes::Securite;
+use crate::flow::transaction_legacy::*;
 
 pub struct FileManagerTransactionService {
     pub transaction: Arc<dyn TransactionService>,
@@ -110,13 +111,13 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(self.mongo.as_ref(), wrapper).await,
 
             // Legacy but still required (no command associated)
-            TRANSACTION_AJOUTER_FICHIERS_COLLECTION => todo!("legacy"),
+            TRANSACTION_AJOUTER_FICHIERS_COLLECTION => legacy_ajouter_fichiers_collection(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_RECUPERER_DOCUMENTS => todo!("legacy"),
             TRANSACTION_DELETE_V2 => todo!("legacy"),
-            TRANSACTION_SUPPRIMER_DOCUMENTS => todo!("legacy"),
+            TRANSACTION_SUPPRIMER_DOCUMENTS => legacy_supprimer_documents(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_VIDEO => todo!("legacy"),
             TRANSACTION_RECYCLE_ITEMS_V3 => todo!("legacy"),
-            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => todo!("legacy"),
+            TRANSACTION_DEPLACER_FICHIERS_COLLECTION => legacy_deplacer_fichiers_collection(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_RECUPERER_DOCUMENTS_V2 => todo!("legacy"),
             TRANSACTION_COPY_V2 => todo!("legacy"),
             TRANSACTION_SUPPRIMER_ORPHELINS => todo!("legacy"),
@@ -144,9 +145,21 @@ impl TransactionRouter for FileManagerTransactionRouter {
         // proper batching, all previous transactions must be flush before running the following
         // action types.
         match action {
+            // Still used with new commands
             TRANSACTION_NOUVELLE_COLLECTION
             | TRANSACTION_NOUVELLE_VERSION
-            | TRANSACTION_ASSOCIER_CONVERSIONS => true,
+            | TRANSACTION_ASSOCIER_CONVERSIONS
+            // legacy
+            | TRANSACTION_DEPLACER_FICHIERS_COLLECTION
+            | TRANSACTION_AJOUTER_FICHIERS_COLLECTION
+            | TRANSACTION_SUPPRIMER_DOCUMENTS
+            | TRANSACTION_RECUPERER_DOCUMENTS
+            | TRANSACTION_RECUPERER_DOCUMENTS_V2
+            | TRANSACTION_DELETE_V2
+            | TRANSACTION_SUPPRIMER_VIDEO
+            | TRANSACTION_RECYCLE_ITEMS_V3
+            | TRANSACTION_COPY_V2
+            | TRANSACTION_SUPPRIMER_ORPHELINS => true,
             _ => false
         }
     }
@@ -889,7 +902,7 @@ async fn delete_video_job(
     Ok(aggregator)
 }
 
-async fn delete_file_reps_v3(
+pub async fn delete_file_reps_v3(
     mongo: &dyn MongoDao,
     wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> {
@@ -1108,7 +1121,7 @@ async fn delete_video(
     Ok(aggregator)
 }
 
-async fn move_files_collections(
+pub async fn move_files_collections(
     mongo: &dyn MongoDao,
     wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> {
