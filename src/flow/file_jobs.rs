@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use millegrilles_common_rust::bson;
 use millegrilles_common_rust::bson::{doc, Document};
-use millegrilles_common_rust::chrono::{DateTime, Duration, Utc};
+use millegrilles_common_rust::chrono::{DateTime, Duration, Timelike, Utc};
 use millegrilles_common_rust::constantes::{Securite, DOMAINE_RELAIWEB};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::jwt_simple::prelude::{Deserialize, Serialize};
@@ -812,6 +812,68 @@ pub async fn reset_indexation(mongo: &dyn MongoDao, outbound: &MessageOutboundFa
         Ok(None) => warn!("reset_indexation: No response received"),
         Err(e) => warn!("reset_indexation Likely a timeout, reporting OK: {:?}", e),
     };
+
+    Ok(())
+}
+
+/// Regular maintenance of media jobs
+pub async fn maintain_file_jobs<M>(
+    mongo: &M,
+    trigger_date: Option<&DateTime<Utc>>
+) -> Result<(), CommonError> {
+
+    let (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases) = match trigger_date {
+        Some(date) => {
+            let hours = date.hour();
+            let minutes = date.minute();
+
+            let run_impossible_jobs = hours % 3 == 2 && minutes == 27;
+            let run_missing_jobs = minutes % 30 == 13;
+            let run_restart_jobs = minutes % 4 == 2;
+            let run_maintain_leases = hours % 3 == 2 && minutes == 9;
+
+            (run_impossible_jobs, run_missing_jobs, run_restart_jobs, run_maintain_leases)
+        },
+        None => (true, true, true, true)
+    };
+
+    // TODO: Complete job handling
+
+    //     if hours % 3 == 2 && minutes == 27
+    //     {
+    //         // Remove media/indexation jobs that will never complete
+    //         info!("maintenance_impossible_jobs STARTING");
+    //         if let Err(e) = maintenance_impossible_jobs(middleware, gestionnaire).await {
+    //             error!("maintenance_impossible_jobs Error: {:?}", e);
+    //         }
+    //         info!("maintenance_impossible_jobs DONE");
+    //     }
+    //
+    //     if minutes % 30 == 13
+    //     {
+    //         info!("create_missing_jobs STARTING");
+    //         if let Err(e) = create_missing_jobs(middleware).await {  // Creer jobs media/indexation manquantes (recovery)
+    //             info!("create_missing_jobs Error: {:?}", e);
+    //         }
+    //         info!("create_missing_jobs DONE");
+    //     }
+    //
+    //     if minutes % 4 == 2
+    //     {
+    //         // Restart expired media jobs
+    //         info!("entretien_jobs_expirees STARTING");
+    //         let fetch_filehosts = minutes == 2;  // Once an hour
+    //         if let Err(e) = entretien_jobs_expirees(middleware, fetch_filehosts).await {
+    //             error!("entretien_jobs_expirees Error: {:?}", e);
+    //         }
+    //         info!("entretien_jobs_expirees DONE");
+    //     }
+    //
+    //     if hours % 3 == 2 && minutes == 9 {
+    //         if let Err(e) = run_cleanup_leases(middleware).await {
+    //             error!("run_cleanup_leases Error: {:?}", e);
+    //         }
+    //     }
 
     Ok(())
 }

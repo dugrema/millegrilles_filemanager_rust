@@ -79,13 +79,19 @@ async fn filehost_new_fuuid<M>(
 
     // Expose fields
     let fuuid = event.fuuid.as_str();
-    let filehost_id = event.filehost_id.as_str();
+    let filehost_id = event.filehost_id.clone();
     let visit_date = &wrapper.message.estampille;
 
     // Marquer la visite courante
-    marquer_visites_fuuids(mongo, &vec![fuuid], visit_date, filehost_id).await?;
+    marquer_visites_fuuids(mongo, &vec![fuuid], visit_date, filehost_id.as_str()).await?;
 
-    declencher_traitement_nouveau_fuuid(mongo, outbound, delayed_event_emitter_service, fuuid, &vec![filehost_id]).await?;
+    declencher_traitement_nouveau_fuuid(
+        mongo,
+        outbound,
+        delayed_event_emitter_service,
+        fuuid,
+        &vec![filehost_id]
+    ).await?;
 
     Ok(())
 }

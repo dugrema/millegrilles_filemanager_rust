@@ -7,9 +7,9 @@ use crate::flow::directories::{get_complete_files, get_path_cuuid, parse_selecti
 use crate::flow::file_events::*;
 use crate::flow::file_jobs::{BackgroundJob, remove_lease, sauvegarder_job_video, set_flag_image_traitee, set_flag_video_traite, trigger_file_indexing};
 use crate::flow::file_sharing::get_shared_cuuids_by_userid;
+use crate::flow::file_topology::verifier_visites_topologies;
 use crate::flow::file_topology::{claim_files_by_deleted_tuuids, claim_files_by_fuuids, claim_files_under_deleted_cuuids};
 use crate::flow::keys::relay_attached_key;
-use crate::flow::maintenance::verifier_visites_topologies;
 use crate::flow::transaction_models::*;
 use crate::flow::transactions::FileManagerTransactionService;
 use crate::models::TypeNode;
@@ -277,7 +277,7 @@ async fn new_file_version<M>(
     };
 
     // Emit file claim - allows it to be synchronized to all filehosts immediately
-    if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid.as_str()]).await {
+    if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid]).await {
         warn!("Error claiming new file version {}: {:?}", tuuid, e);
     }
 
@@ -336,10 +336,10 @@ async fn associate_file_conversions<M>(
 
     // Emit file claim - allows it to be synchronized to all filehosts immediately
     let mut image_fuuids = Vec::new();
-    for (_, image) in &command.images {
+    for (_, image) in command.images {
         if image.data_chiffre.is_none() {
             // This is not an inline thumbnail
-            image_fuuids.push(image.hachage.as_str());
+            image_fuuids.push(image.hachage);
         }
     }
 
@@ -638,7 +638,7 @@ async fn associate_video_conversion<M>(
     }
 
     // Emit file claim - allows it to be synchronized to all filehosts immediately
-    if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid_video.as_str()]).await {
+    if let Err(e) = verifier_visites_topologies(outbound, &vec![command.fuuid_video]).await {
         warn!("commande_associer_conversions Error claiming new video for file {:?}: {:?}", command.tuuid, e);
     }
 

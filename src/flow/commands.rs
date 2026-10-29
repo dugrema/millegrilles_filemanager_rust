@@ -4,7 +4,7 @@ use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFich
 use crate::external::mq::*;
 use crate::flow::access::{verify_user_access_tuuids, verify_user_certificate};
 use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, RequestLeaseForBatchOperation, RequestReturnFichiersrepLease, get_batch_of_fichiersrep_leases, get_batch_of_fichiersversion_leases, lease_batch_fichiersrep, reset_indexation, return_fichiersrep_lease, sauvegarder_job_video};
-use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
+use crate::flow::file_topology::RequeteGetVisitesFuuidsResponse;
 use crate::models::TypeNode;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;

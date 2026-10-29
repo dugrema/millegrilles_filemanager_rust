@@ -1,9 +1,10 @@
+use std::borrow::Cow;
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, sauvegarder_job_video};
-use crate::flow::maintenance::RequeteGetVisitesFuuidsResponse;
+use crate::flow::file_topology::RequeteGetVisitesFuuidsResponse;
 use crate::flow::request_models::ResponseFichierRepVersion;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
@@ -23,6 +24,7 @@ use millegrilles_common_rust::{bson, serde_json, tokio};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use millegrilles_common_rust::mongodb::ClientSession;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollectionEventAggregator {
@@ -400,7 +402,7 @@ pub async fn declencher_traitement_nouveau_fuuid<M>(
     outbound: &MessageOutboundFacade,
     delayed_event_emitter_service: &DelayedEventEmitterService,
     fuuid: &str,
-    filehost_ids: &Vec<&str>
+    filehost_ids: &Vec<String>
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
     let filtre = doc! { "fuuid": fuuid };
     let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
@@ -408,7 +410,10 @@ pub async fn declencher_traitement_nouveau_fuuid<M>(
 
     // Find all tuuids that match this fuuid. Process independently.
     // When this is a new file there should only be one. Later on processing is already complete.
-    let mut curseur = collection_versions.find(filtre).await?;
+    let mut curseur = collection_versions
+        .find(filtre)
+        .await?;
+
     while let Some(r) = curseur.next().await {
         let doc_fuuid = r?;
 
@@ -423,7 +428,9 @@ pub async fn declencher_traitement_nouveau_fuuid<M>(
         // Find a matching tuuid for the user_id/fuuid. If the user has copied the file multiple times,
         // only one of the tuuid will be used. Since this is a new file, it should not be an issue.
         let filtre_reps = doc!{"fuuids_versions": fuuid};
-        let mut cursor = collection_reps.find(filtre_reps).await?;
+        let mut cursor = collection_reps
+            .find(filtre_reps)
+            .await?;
         while let Some(r) = cursor.next().await {
             let rep = r?;
 
@@ -433,11 +440,12 @@ pub async fn declencher_traitement_nouveau_fuuid<M>(
             // Extract information for background job if all fields present
             let job = match (doc_fuuid.format.as_ref(), doc_fuuid.nonce.as_ref()) {
                 (Some(format), Some(nonce)) => {
+                    let filehost_ids: Vec<&str> = filehost_ids.iter().map(|f| f.as_str()).collect();
                     Some(BackgroundJob::new(
                         tuuid, 
                         fuuid, 
                         doc_fuuid.mimetype.as_str(), 
-                        filehost_ids,
+                        &filehost_ids,
                         cle_id, 
                         format.into(), 
                         nonce

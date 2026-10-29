@@ -120,6 +120,7 @@ impl ApplicationService {
                         self.mongo.as_ref(),
                         self.outbound.as_ref(),
                         self.backup.as_ref(),
+                        self.event_emitter_service.as_ref(),
                         message
                     ).await {
                         error!("Ticker job failed: {}", e);
