@@ -16,13 +16,14 @@ use millegrilles_common_rust::mongodb::ClientSession;
 use millegrilles_common_rust::mongodb::options::{DeleteManyModel, DeleteOneModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::serde_json::Value;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::debug;
+use millegrilles_common_rust::tracing::{debug, warn};
 use millegrilles_common_rust::v3::impls::transaction_service::TransactionServiceImpl;
 use millegrilles_common_rust::v3::models::*;
 use millegrilles_common_rust::v3::{ConfigService, FormatService, TransactionRouter, TransactionService};
 use millegrilles_common_rust::bson;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use millegrilles_common_rust::constantes::Securite;
 
 pub struct FileManagerTransactionService {
     pub transaction: Arc<dyn TransactionService>,
@@ -162,6 +163,7 @@ async fn new_collection(
     legacy_v1: bool,
 ) -> Result<TransactionOperationAggregator, CommonError> {
     let transaction: TransactionNouvelleCollection = wrapper.message.deserialize()?;
+    debug!("new_collection tuuid:{}", wrapper.message.id);
 
     let user_id = match transaction.user_id {
         Some(user_id) => {
@@ -236,6 +238,7 @@ async fn new_file_version<M>(
     wrapper: TransactionWrapper,
     legacy_v1: bool,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
+    debug!("new_file_version tuuid:{}", wrapper.message.id);
     let transaction_value: TransactionNouvelleVersion = wrapper.message.deserialize()?;
 
     let user_id = match transaction_value.user_id {
@@ -603,10 +606,14 @@ async fn update_file_text_content(
     wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> {
     let transaction: TransactionUpdateFileTextContent = wrapper.message.deserialize()?;
+    debug!("update_file_text_content id:{}, tuuid:{}, content_id:{:?}", wrapper.message.id, transaction.tuuid, transaction.comment_id);
 
     let user_id = match wrapper.certificate.get_user_id()? {
         Some(inner) => inner,
-        None => Err(format!("transaction_update_file_text_content Missing user_id from certificate for id:{}", wrapper.message.id))?
+        None => {
+            warn!("transaction_update_file_text_content Missing user_id, certificate is {:?}\ntransaction is: {:?}", wrapper.certificate.subject()?, transaction);
+            Err(format!("transaction_update_file_text_content Missing user_id from certificate for id:{}", wrapper.message.id))?
+        }
     };
 
     let tuuid = transaction.tuuid.as_str();
@@ -678,7 +685,7 @@ async fn update_file_text_content(
     }
 
     // Update file modification date has hint to change during sync, set index flag to false to re-index the file
-    let filter = doc! {"tuuid": tuuid, "user_id": &user_id};
+    let filter = doc! { "tuuid": tuuid, "user_id": &user_id };
     let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
     let ops = doc! {
         "$set": { CHAMP_FLAG_INDEX: false },
@@ -686,7 +693,6 @@ async fn update_file_text_content(
     };
     let update_model = WriteModel::UpdateOne(
         UpdateOneModel::builder()
-            .upsert(true)
             .namespace(collection.namespace())
             .filter(filter)
             .update(ops)
@@ -1193,6 +1199,7 @@ async fn file_summary(
     wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> {
     let transaction: TransactionFileSummary = wrapper.message.deserialize()?;
+    debug!("file_summary id:{}, tuuid:{}", wrapper.message.id, transaction.tuuid);
 
     let mut models = Vec::with_capacity(5);
 
@@ -1567,7 +1574,10 @@ async fn share_add_collection(
     let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
     let user_id = match wrapper.certificate.get_user_id()? {
         Some(user_id) => user_id,
-        None => return Err(CommonError::Str("User_id missing from cetificate"))
+        None => {
+            warn!("share_add_collection Error missing user_id (cert:{:?}) transaction: {:?}", wrapper.certificate.subject()?, transaction);
+            return Err(CommonError::Str("User_id missing from certificate"))
+        }
     };
 
     let mut models = Vec::with_capacity(transaction.contact_ids.len() + transaction.cuuids.len());

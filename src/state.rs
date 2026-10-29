@@ -19,7 +19,7 @@ use millegrilles_common_rust::v3::impls::filehost_service::FilehostServiceImpl;
 use millegrilles_common_rust::v3::impls::format_service::FormatServiceImpl;
 use millegrilles_common_rust::v3::impls::messaging_service::MessagingServiceImpl;
 use millegrilles_common_rust::v3::impls::security_service::SecurityServiceImpl;
-use millegrilles_common_rust::v3::{ChiffrageService, ConfigService};
+use millegrilles_common_rust::v3::{ChiffrageService, ConfigService, MessagingService};
 use std::sync::Arc;
 use millegrilles_common_rust::chrono::Duration;
 use millegrilles_common_rust::v3::facades::document_encryption_service::DocumentEncryptionServiceImpl;
@@ -113,7 +113,7 @@ impl AppContext {
         start_threads(
             &mut join_set,
             security.clone(),
-            messaging.as_ref(),
+            messaging.clone(),
             inbound.clone(),
             filehost.clone(),
             app_service.clone(),
@@ -156,7 +156,7 @@ async fn init_security(config: &dyn ConfigService) -> Result<SecurityServiceImpl
 async fn start_threads(
     join_set: &mut JoinSet<()>,
     security: Arc<SecurityServiceImpl>,
-    messaging: &MessagingServiceImpl,
+    messaging: Arc<MessagingServiceImpl>,
     inbound: Arc<MessageInboundValidator>,
     filehost: Arc<FilehostServiceImpl>,
     app_service: Arc<ApplicationService>,
@@ -187,7 +187,9 @@ async fn start_threads(
         };
         info!("Not starting consumer threads - restoring from backup");
         let shutdown_token_clone = shutdown_token.clone();
+        let messaging_clone = messaging.clone();
         join_set.spawn(async move {
+            messaging_clone.is_ready().await.expect("Messaging init error");
             restore_from_backup(app_service, no_resume, &master_key, shutdown_token_clone).await
         });
     }
