@@ -10,7 +10,7 @@ use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::hachages::hacher_bytes;
-use millegrilles_common_rust::mongodb::options::{Hint, UpdateManyModel, WriteModel};
+use millegrilles_common_rust::mongodb::options::{Hint, UpdateManyModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::multibase::Base;
 use millegrilles_common_rust::multihash::Code;
 use millegrilles_common_rust::tokio_stream::StreamExt;
@@ -578,6 +578,100 @@ pub async fn legacy_recuperer_documents<M>(
                 )
             );
         }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+    Ok(aggregator)
+}
+
+#[derive(Deserialize)]
+pub struct TransactionSupprimerVideo {
+    pub fuuid_video: String,
+}
+
+pub async fn legacy_supprimer_video<M>(
+    mongo: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
+    debug!("legacy_supprimer_video id:{}", wrapper.message.id);
+    let transaction_value: TransactionSupprimerVideo = wrapper.message.deserialize()?;
+
+    let fuuid = &transaction_value.fuuid_video;
+
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(id) => id,
+        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+    };
+
+    // Find the original fuuid for the video
+    let filtre_versions = doc!{"fuuids_reclames": fuuid};
+    let collection_versions =
+        mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let file_version = match collection_versions.find_one(filtre_versions.clone()).await? {
+        Some(inner) => inner,
+        None => Err(format!("transaction_supprimer_video No matching file version found with fuuid {}", fuuid))?
+    };
+    let fuuid_original = file_version.fuuid.as_str();
+
+    // Load media information for original fuuid/user_id
+    let filtre_media = doc!{ FIELD_FUUID: fuuid_original, FIELD_USER_ID: &user_id };
+    let collection_media = mongo.get_collection_typed::<MediaOwnedRow>(NOM_COLLECTION_MEDIA)?;
+    let doc_video = match collection_media.find_one(filtre_media.clone()).await {
+        Ok(d) => match d {
+            Some(d) => d,
+            None => Err(format!("transaction_supprimer_video No document match on user_id:{}/fuuid:{}", user_id, fuuid))?
+        },
+        Err(e) => Err(format!("transaction_supprimer_video Erreur chargement info document : {:?}", e))?
+    };
+
+    // Find video label matching video fuuid to remove
+    let mut ops_unset_video = doc!{};
+    if let Some(map_video) = doc_video.video.as_ref() {
+        for (label, video) in map_video {
+            if &video.fuuid_video == fuuid {
+                ops_unset_video.insert(format!("video.{}", label), true);
+            }
+        }
+    }
+
+    // Ensure there is a video with that fuuid
+    if ops_unset_video.len() == 0 {
+        return Ok(TransactionOperationAggregator::new())  // Nothing to do
+    }
+
+    let mut models = Vec::new();
+
+    // Remove video with matching fuuid
+    let ops_media = doc!{"$unset": ops_unset_video, "$currentDate": { FIELD_DATE_MODIFIED: true }};
+    models.push(
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(collection_media.namespace())
+                .filter(filtre_media)
+                .update(ops_media)
+                .build()
+        )
+    );
+
+    // Cleanup file version (claimed fuuids)
+    {
+        let ops = doc! {
+            "$pull": {CHAMP_FUUIDS_RECLAMES: fuuid},
+            "$currentDate": { FIELD_DATE_MODIFIED: true },
+        };
+        let collection_version_fichier = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+
+        debug!("transaction_supprimer_video Supprimer video {:?} ops {:?}", filtre_versions, ops);
+        models.push(
+            WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(collection_version_fichier.namespace())
+                    .filter(filtre_versions)
+                    .update(ops)
+                    .build()
+            )
+        );
     }
 
     let mut aggregator = TransactionOperationAggregator::new();
