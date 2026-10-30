@@ -258,13 +258,13 @@ async fn new_file_version<M>(
         Some(user_id) => {
             // New type, ensure the certificate is from filemanager
             if legacy_v1 || ! wrapper.certificate.verifier_domaines(vec![DOMAIN_NAME.to_string()])? {
-                return Err(CommonError::Str("Wrong domain, new_collection transaction with user_id not allowed"))
+                return Err(CommonError::Str("Wrong domain, new_file_version transaction with user_id not allowed"))
             }
             user_id
         },
         None => match wrapper.certificate.get_user_id()? {
             Some(user_id) => user_id,
-            None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+            None => return Err(CommonError::Str("User_id missing from certificate in new_file_version transaction"))
         }
     };
 
@@ -289,7 +289,7 @@ async fn new_file_version<M>(
         Some(path_cuuids) => path_cuuids,
         None => {
             if ! legacy_v1 {
-                return Err(CommonError::Str("path_cuuids required for nouvelleCollectionV2"))
+                return Err(CommonError::Str("path_cuuids required for new_file_version"))
             }
             match get_path_cuuid(mongo, transaction_value.cuuid.as_str()).await? {
                 Some(inner) => inner,

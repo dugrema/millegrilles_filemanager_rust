@@ -37,7 +37,7 @@ pub async fn legacy_deplacer_fichiers_collection<M>(
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
     let user_id = match wrapper.certificate.get_user_id()? {
         Some(id) => id,
-        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+        None => return Err(CommonError::Str("User_id missing from certificate in legacy_deplacer_fichiers_collection transaction"))
     };
 
     let transaction_collection: TransactionDeplacerFichiersCollection = wrapper.message.deserialize()?;
@@ -627,7 +627,7 @@ pub async fn legacy_supprimer_video<M>(
 
     let user_id = match wrapper.certificate.get_user_id()? {
         Some(id) => id,
-        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+        None => return Err(CommonError::Str("User_id missing from certificate in legacy_supprimer_video transaction"))
     };
 
     // Find the original fuuid for the video
@@ -719,7 +719,7 @@ pub async fn legacy_recuperer_documents_v2<M>(
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
     let user_id = match wrapper.certificate.get_user_id()? {
         Some(id) => id,
-        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+        None => return Err(CommonError::Str("User_id missing from certificate in legacy_recuperer_documents_v2 transaction"))
     };
 
     let transaction_value: TransactionRecupererDocumentsV2 = wrapper.message.deserialize()?;
@@ -1007,12 +1007,13 @@ pub async fn legacy_copy_v2<M>(
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
+    let transaction_value: TransactionCopyV2 = wrapper.message.deserialize()?;
+
     let user_id = match wrapper.certificate.get_user_id()? {
         Some(id) => id,
-        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+        None => transaction_value.user_id.clone(),
     };
 
-    let transaction_value: TransactionCopyV2 = wrapper.message.deserialize()?;
     let created = wrapper.message.estampille.clone();
 
     let include_deleted = transaction_value.include_deleted.unwrap_or(false);
