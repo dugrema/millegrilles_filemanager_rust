@@ -374,7 +374,7 @@ pub async fn create_index_mongodb(db: &dyn MongoDao) -> Result<(), CommonError> 
     db.create_index(
         NOM_COLLECTION_FILE_COMMENTS,
         vec!(
-            ChampIndex {nom_champ: String::from(CHAMP_FUUID), direction: 1},
+            ChampIndex {nom_champ: String::from(CHAMP_TUUID), direction: 1},
             ChampIndex {nom_champ: String::from("comment_id"), direction: 1},
         ),
         Some(IndexOptions { nom_index: Some("comment_id".to_string()), unique: true })
