@@ -456,12 +456,10 @@ async fn lease_file_version(
     };
 
     let collection = middleware.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
-    let result = collection
-        .update_one(filtre, ops)
-        .upsert(true)
-        .await?;
-
-    Ok(result.modified_count == 1 || result.upserted_id.is_some())
+    match collection.update_one(filtre, ops).await {
+        Ok(result) => Ok(result.modified_count == 1 || result.upserted_id.is_some()),
+        Err(_) => Ok(false)
+    }
 }
 
 #[derive(Serialize)]
@@ -668,13 +666,15 @@ async fn lease_file(
     };
 
     let collection = mongo.get_collection(NOM_COLLECTION_JOBS_LEASES)?;
-    let result = collection
+    match collection
         .update_one(filtre, ops)
         .upsert(true)
-        .await?;
-
-    // Returns true when a lease record is added or updated - this means the lease is successful
-    Ok(result.modified_count == 1 || result.upserted_id.is_some())
+        .await
+    {
+        // Returns true when a lease record is added or updated - this means the lease is successful
+        Ok(result) => Ok(result.modified_count == 1 || result.upserted_id.is_some()),
+        Err(_) => Ok(false),
+    }
 }
 
 pub async fn set_flag_image_traitee(
