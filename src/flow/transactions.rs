@@ -404,7 +404,9 @@ async fn associate_file_conversions<M>(
             user_ids.insert(row?.user_id);
         }
         if user_ids.is_empty() {
-            return Err(CommonError::String(format!("transaction_associer_conversions No match for fuuid {}", transaction.fuuid)))
+            warn!("transaction_associer_conversions No match for fuuid {}, **SKIPPING**", transaction.fuuid);
+            return Ok(TransactionOperationAggregator::new());
+            // return Err(CommonError::String(format!("transaction_associer_conversions No match for fuuid {}", transaction.fuuid)))
         }
         user_ids.into_iter().collect::<Vec<String>>()
     } else {
