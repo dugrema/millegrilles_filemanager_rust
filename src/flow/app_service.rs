@@ -255,15 +255,13 @@ impl ApplicationService {
                         self.backup.as_ref(),
                         message
                     ).await {
-                        error!("Reading job failed: {}", e);
+                        error!("Backup job failed: {}", e);
                     }
                 }
-                Err(e) => {
-                    error!("Error processing reading message: {}", e);
-                }
+                Err(e) => error!("Error processing backup message: {}", e)
             }
         }
-        debug!("process_readings_thread Closed");
+        debug!("process_backup_thread Closed");
     }
 
     pub async fn restore(
