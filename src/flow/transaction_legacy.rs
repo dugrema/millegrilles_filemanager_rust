@@ -26,7 +26,7 @@ use crate::external::mongo_struct::{ContactRow, MediaOwnedRow, NodeFichierRepOwn
 use crate::flow::directories::{get_path_cuuid, RowRepertoirePaths, parse_selection_directories};
 use crate::flow::file_events::CollectionEventAggregator;
 use crate::flow::transaction_commands::{process_transaction, TransactionAjouterFichiersCollection, TransactionDeplacerFichiersCollection};
-use crate::flow::transaction_models::{TransactionDeleteV3, TransactionMoveV2, TransactionMoveV2Directory};
+use crate::flow::transaction_models::{TransactionDeleteV2, TransactionDeleteV3, TransactionMoveV2, TransactionMoveV2Directory};
 use crate::flow::transactions::{delete_file_reps_v3, move_files_collections};
 use crate::models::TypeNode;
 
@@ -1187,6 +1187,197 @@ where M: MongoDaoTyped
                 }
             }
         }
+    }
+
+    Ok(models)
+}
+
+pub async fn legacy_delete_v2<M>(
+    middleware: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
+{
+    debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
+    let transaction_value: TransactionDeleteV2 = wrapper.message.deserialize()?;
+
+    let collection_fichiersrep =
+        middleware.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let collection_fichiersversion =
+        middleware.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+
+    let mut models = Vec::with_capacity(100);
+
+    // Handle subdirectories first
+    if let Some(subdirectories) = transaction_value.subdirectories {
+        debug!("transaction_delete_v2 Delete subdirectories: {:?}", subdirectories);
+        let operations = delete_file_versions_from_directories(middleware, &subdirectories).await?;
+        models.extend(operations);
+
+        // Mark all the files as indirectly deleted in the rep collection
+        let filtre_rep = doc! {
+            FIELD_PATH_CUUIDS_0: {"$in": &subdirectories},
+            FIELD_DELETED: false,
+            FIELD_NODE_TYPE: TypeNode::Fichier.to_str()
+        };
+        let ops = doc!{
+            "$set": { FIELD_DELETED: true, FIELD_DELETED_INDIRECT: true },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersrep.namespace())
+                    .filter(filtre_rep)
+                    .update(ops)
+                    .build()
+            )
+        );
+
+        // Mark all listed subdirectories as deleted indirectly.
+        let directory_filtre = doc!{ FIELD_TUUID: {"$in": subdirectories} };
+        let directory_ops = doc!{
+            "$set": { FIELD_DELETED: true, FIELD_DELETED_INDIRECT: true, CHAMP_FLAG_INDEX: false},
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersrep.namespace())
+                    .filter(directory_filtre)
+                    .update(directory_ops)
+                    .build()
+            )
+        );
+
+    }
+
+    // Directories being directly targeted by the delete command
+    if let Some(directories) = transaction_value.directories {
+        debug!("transaction_delete_v2 Delete directories: {:?}", directories);
+        let operations = delete_file_versions_from_directories(middleware, &directories).await?;
+        models.extend(operations);
+
+        // Mark all the files as indirectly deleted in the rep collection
+        let filtre_rep = doc! {
+            FIELD_PATH_CUUIDS_0: { "$in": &directories },
+            FIELD_DELETED: false,
+            FIELD_NODE_TYPE: TypeNode::Fichier.to_str()
+        };
+        let ops = doc!{
+            "$set": { FIELD_DELETED: true, FIELD_DELETED_INDIRECT: true, CHAMP_FLAG_INDEX: false },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersrep.namespace())
+                    .filter(filtre_rep)
+                    .update(ops)
+                    .build()
+            )
+        );
+
+        // Mark all listed directories as deleted directly.
+        let directory_filtre = doc!{ FIELD_TUUID: { "$in": directories } };
+        let directory_ops = doc!{
+            "$set": { FIELD_DELETED: true, FIELD_DELETED_INDIRECT: false, CHAMP_FLAG_INDEX: false },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersrep.namespace())
+                    .filter(directory_filtre)
+                    .update(directory_ops)
+                    .build()
+            )
+        );
+
+    }
+
+    if let Some(files) = transaction_value.files {
+        debug!("transaction_delete_v2 Delete files: {:?}", files);
+        // Mark all listed files as deleted.
+
+        let version_filtre = doc!{ FIELD_TUUIDS: { "$in": &files } };
+        let version_ops = doc!{
+            "$pullAll": { FIELD_TUUIDS: &files },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersversion.namespace())
+                    .filter(version_filtre)
+                    .update(version_ops)
+                    .build()
+            )
+        );
+
+        let file_filtre = doc!{ FIELD_TUUID: {"$in": &files} };
+        let rep_ops = doc!{
+            "$set": { FIELD_DELETED: true, FIELD_DELETED_INDIRECT: false, CHAMP_FLAG_INDEX: false},
+            "$currentDate": {FIELD_DATE_MODIFIED: true}
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersrep.namespace())
+                    .filter(file_filtre)
+                    .update(rep_ops)
+                    .build()
+            )
+        );
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+    Ok(aggregator)
+}
+
+async fn delete_file_versions_from_directories<M>(
+    middleware: &M,
+    subdirectories: &Vec<String>
+) -> Result<Vec<WriteModel>, CommonError> where M: MongoDaoTyped {
+    // Iterate through all directories in fichiers rep to find matching files. The recursive
+    // work of finding subdirectories has already been done in the command.
+
+    let collection_fichiersrep =
+        middleware.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let collection_fichiersversion =
+        middleware.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+
+    let mut models = Vec::new();
+
+    for cuuid in subdirectories {
+        // List all files directly under the cuuid (and not already deleted)
+        let filtre_files = doc! {
+            FIELD_PATH_CUUIDS_0: cuuid,
+            FIELD_DELETED: false,
+            FIELD_NODE_TYPE: TypeNode::Fichier.to_str()
+        };
+        let mut cursor = collection_fichiersrep.find(filtre_files.clone()).await?;
+        let mut file_tuuids = Vec::new();
+        while cursor.advance().await? {
+            let row = cursor.deserialize_current()?;
+            file_tuuids.push(row.tuuid.to_owned());
+        }
+
+        // Mark all files in the version collection as deleted
+        let filtre_tuuids = doc! { FIELD_TUUIDS: { "$in": &file_tuuids } };
+        let version_ops = doc!{
+            "$pullAll": { FIELD_TUUIDS: file_tuuids },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_fichiersversion.namespace())
+                    .filter(filtre_tuuids)
+                    .update(version_ops)
+                    .build()
+            )
+        );
     }
 
     Ok(models)
