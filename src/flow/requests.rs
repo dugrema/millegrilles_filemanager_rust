@@ -113,7 +113,7 @@ async fn request_sync_directory<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
-    info!("Requesting sync directory");
+    debug!("Requesting sync directory");
     let request: RequestSyncDirectory = wrapper.message.deserialize()?;
 
     // Authorization, includes checking for shared folder access (impersonating other user_id for request)
