@@ -1,34 +1,30 @@
 // Support for older transactions no longer used through commands
 // Needed for restoration of backups (redo-log).
 
-use std::collections::{HashMap, HashSet};
-use millegrilles_common_rust::{bson, hex, serde_json};
-use millegrilles_common_rust::bson::doc;
-use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::chrono::{DateTime, Utc};
-use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
-use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
-use millegrilles_common_rust::error::Error as CommonError;
-use millegrilles_common_rust::hachages::{hacher_bytes, hacher_bytes_vu8};
-use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
-use millegrilles_common_rust::mongodb::Cursor;
-use millegrilles_common_rust::mongodb::options::{DeleteManyModel, Hint, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
-use millegrilles_common_rust::multibase::Base;
-use millegrilles_common_rust::multihash::Code;
-use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, error, info, warn};
-use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
-use millegrilles_common_rust::v3::impls::rabbitmq_consumer::DeliveryInfo;
-use serde::{Deserialize, Serialize};
-use crate::constants::{DOMAIN_NAME, TRANSACTION_DELETE_V3, TRANSACTION_MOVE_V2};
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{ContactRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
-use crate::flow::directories::{get_path_cuuid, RowRepertoirePaths, parse_selection_directories};
-use crate::flow::file_events::CollectionEventAggregator;
-use crate::flow::transaction_commands::{process_transaction, TransactionAjouterFichiersCollection, TransactionDeplacerFichiersCollection};
+use crate::flow::directories::{get_path_cuuid, parse_selection_directories};
+use crate::flow::transaction_commands::{TransactionAjouterFichiersCollection, TransactionDeplacerFichiersCollection};
 use crate::flow::transaction_models::{TransactionDeleteV2, TransactionDeleteV3, TransactionMoveV2, TransactionMoveV2Directory};
 use crate::flow::transactions::{delete_file_reps_v3, move_files_collections};
 use crate::models::TypeNode;
+use millegrilles_common_rust::bson::doc;
+use millegrilles_common_rust::certificats::VerificateurPermissions;
+use millegrilles_common_rust::chrono::{DateTime, Utc};
+use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::hachages::{hacher_bytes, hacher_bytes_vu8};
+use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
+use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
+use millegrilles_common_rust::mongodb::Cursor;
+use millegrilles_common_rust::mongodb::options::{DeleteManyModel, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::multibase::Base;
+use millegrilles_common_rust::multihash::Code;
+use millegrilles_common_rust::tokio_stream::StreamExt;
+use millegrilles_common_rust::tracing::{debug, error, warn};
+use millegrilles_common_rust::v3::models::{TransactionOperationAggregator, TransactionWrapper};
+use millegrilles_common_rust::{bson, hex, serde_json};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub async fn legacy_deplacer_fichiers_collection<M>(
     mongo: &M,
@@ -559,7 +555,7 @@ pub struct TransactionListeDocuments {
 
 pub async fn legacy_recuperer_documents<M>(
     mongo: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
     debug!("legacy_recuperer_documents id:{}", wrapper.message.id);
@@ -590,7 +586,7 @@ pub async fn legacy_recuperer_documents<M>(
     let filtre = doc! { FIELD_TUUID: { "$in": &transaction_collection.tuuids }, FIELD_NODE_TYPE: TypeNode::Fichier.to_str() };
     let mut cursor = collection_reps.find(filtre.clone()).await?;
     while let Some(row) = cursor.next().await {
-        let row = cursor.deserialize_current()?;
+        let row = row?;
         if let Some(fuuids) = row.fuuids_versions {
             let filtre_versions = doc! { FIELD_FUUID: { "$in": fuuids } };
             let ops = doc! { "$addToSet": { FIELD_TUUIDS: row.tuuid }, "$currentDate": { FIELD_DATE_MODIFIED: true } };
@@ -618,7 +614,7 @@ pub struct TransactionSupprimerVideo {
 
 pub async fn legacy_supprimer_video<M>(
     mongo: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
     debug!("legacy_supprimer_video id:{}", wrapper.message.id);
     let transaction_value: TransactionSupprimerVideo = wrapper.message.deserialize()?;
@@ -713,7 +709,7 @@ pub struct TransactionRecupererDocumentsV2 {
 
 pub async fn legacy_recuperer_documents_v2<M>(
     mongo: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
@@ -915,7 +911,7 @@ pub struct TransactionSupprimerOrphelins {
 
 pub async fn legacy_supprimer_orphelins<M>(
     mongo: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
 
@@ -956,10 +952,11 @@ pub async fn legacy_supprimer_orphelins<M>(
         "$currentDate": { FIELD_DATE_MODIFIED: true }
     };
     models.push(
-        WriteModel::DeleteMany(
-            DeleteManyModel::builder()
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
                 .namespace(collection_reps.namespace())
                 .filter(filtre_reps)
+                .update(ops_reps)
                 .build()
         )
     );
@@ -1003,7 +1000,7 @@ fn digest_new_tuuid(transaction_id_bytes: &Vec<u8>, old_tuuid: &str) -> String {
 
 pub async fn legacy_copy_v2<M>(
     middleware: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
@@ -1194,7 +1191,7 @@ where M: MongoDaoTyped
 
 pub async fn legacy_delete_v2<M>(
     middleware: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
@@ -1386,7 +1383,7 @@ async fn delete_file_versions_from_directories<M>(
 #[derive(Deserialize)]
 pub struct TransactionRecycleItemsV3 {
     /// Original command
-    pub command: MessageMilleGrillesOwned,
+    // pub command: MessageMilleGrillesOwned,
 
     /// User Id
     pub user_id: String,
@@ -1401,7 +1398,7 @@ pub struct TransactionRecycleItemsV3 {
 
 pub async fn legacy_recycle_items_v3<M>(
     mongo: &M,
-    mut wrapper: TransactionWrapper,
+    wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
     debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);

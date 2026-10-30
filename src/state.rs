@@ -1,9 +1,12 @@
 use crate::Cli;
+use crate::external::mongo::*;
 use crate::flow::app_service::ApplicationService;
+use crate::flow::file_events::DelayedEventEmitterService;
 use crate::flow::restore::restore_from_backup;
 use crate::flow::transactions::FileManagerTransactionService;
 use millegrilles_common_rust::certificats::build_store_path_v2;
 use millegrilles_common_rust::chiffrage_cle::CleChiffrageHandlerImpl;
+use millegrilles_common_rust::chrono::Duration;
 use millegrilles_common_rust::configuration::{ConfigDb, ConfigMessages, charger_configuration, charger_configuration_mongo};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::mongo_dao::initialiser_v3;
@@ -21,11 +24,6 @@ use millegrilles_common_rust::v3::impls::messaging_service::MessagingServiceImpl
 use millegrilles_common_rust::v3::impls::security_service::SecurityServiceImpl;
 use millegrilles_common_rust::v3::{ChiffrageService, ConfigService, MessagingService};
 use std::sync::Arc;
-use millegrilles_common_rust::chrono::Duration;
-use millegrilles_common_rust::v3::facades::document_encryption_service::DocumentEncryptionServiceImpl;
-use crate::constants::DOMAIN_NAME;
-use crate::external::mongo::*;
-use crate::flow::file_events::DelayedEventEmitterService;
 
 pub struct AppContext {
     pub join_set: JoinSet<()>,

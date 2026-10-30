@@ -1,36 +1,33 @@
 use crate::constants::*;
 use crate::external::mongo::*;
+use crate::external::mongo_struct::{ContactRow, RowPartagesUsager, StreamTokenRow};
 use crate::external::mq::*;
-use crate::flow::access::{verifier_acces_usager_media, verify_user_certificate};
-use crate::flow::directories::{get_complete_files, get_directory_navigation_headers, get_directory_statistics, get_shared_tuuid, ResultatStatistiquesRow};
+use crate::flow::access::verify_user_certificate;
+use crate::flow::directories::{ResultatStatistiquesRow, get_complete_files, get_directory_navigation_headers, get_directory_statistics, get_shared_tuuid};
 use crate::flow::file_jobs::BackgroundJob;
-use crate::flow::keys::{allow_key_decryption, convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2, fetch_decryption_information, FileDecryptionInformation};
+use crate::flow::file_sharing::{get_contacts_user, get_shared_cuuids_by_userid, map_user_ids_nom_usager};
+use crate::flow::keys::{FileDecryptionInformation, convert_decrypted_key_into_v2, convert_decrypted_key_vec_into_v2, fetch_decryption_information};
 use crate::flow::request_models::*;
+use millegrilles_common_rust::bson;
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
+use millegrilles_common_rust::chrono::serde::ts_seconds;
 use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
-use millegrilles_common_rust::constantes::{RolesCertificats, DELEGATION_GLOBALE_PROPRIETAIRE, Securite, ROLE_SOLR_RELAI};
+use millegrilles_common_rust::constantes::{DELEGATION_GLOBALE_PROPRIETAIRE, ROLE_SOLR_RELAI, RolesCertificats, Securite};
 use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::generateur_messages::{RoutageMessageAction, RoutingValidation};
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
-use millegrilles_common_rust::v3::{ConfigService, FormatService, MessagingService};
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use millegrilles_common_rust::bson;
-use millegrilles_common_rust::generateur_messages::{RoutageMessageAction, RoutingValidation};
-use crate::external::mongo_struct::{ContactRow, NodeFichierVersionOwned, RowPartagesUsager, StreamTokenRow};
-use crate::flow::file_sharing::{get_contacts_user, get_shared_cuuids_by_userid, map_user_ids_nom_usager};
-use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
 
 pub async fn process_request<M>(
-    messaging: &dyn MessagingService,
-    format: &dyn FormatService,
     mongo: &M,
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated,
@@ -505,20 +502,6 @@ async fn request_video_conversion_job<M>(
     outbound.respond(wrapper.delivery_info, ResponseJobsVideo { jobs }).await
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RequeteGenererJwtStreaming {
-    fuuid: String,
-    fuuid_ref: Option<String>,
-    contact_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ReponseCreerJwtStreaming {
-    ok: bool,
-    err: Option<String>,
-    jwt_token: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct RequetePartagesUsager { contact_id: Option<String> }
 
@@ -731,7 +714,7 @@ struct SearchResultContent {
 
 #[derive(Deserialize)]
 struct SearchResult {
-    ok: bool,
+    // ok: bool,
     resultat: SearchResultContent
 }
 

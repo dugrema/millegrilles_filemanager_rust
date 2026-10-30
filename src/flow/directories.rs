@@ -1,6 +1,5 @@
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, ContactRow, NodeFichierRepOwned, RowPartagesUsager};
-use crate::flow::file_topology::verifier_visites_topologies;
 use crate::flow::request_models::{ReponseDocumentsParTuuid, ResponseFichierRepVersion, ResponseVersionCourante};
 use crate::flow::transaction_models::TransactionMoveV2Directory;
 use crate::models::TypeNode;
@@ -10,11 +9,10 @@ use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::mongodb::ClientSession;
 use millegrilles_common_rust::tokio_stream::StreamExt;
-use millegrilles_common_rust::tracing::{debug, error, warn};
-use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
+use millegrilles_common_rust::tracing::{debug, warn};
 use millegrilles_common_rust::{bson, serde_json};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub struct UserSharedTuuid {
     pub user_id: String,

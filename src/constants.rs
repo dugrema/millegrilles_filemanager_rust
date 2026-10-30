@@ -5,10 +5,10 @@ pub const DOMAINE_FILECONTROLER_NOM: &str = "filecontroler";
 pub const DOMAINE_MEDIA_NOM: &str = "media";
 pub const DOMAIN_RELAI_SOLR: &str = "solrrelai";
 
-pub const DELEGATION_OWNER: &str = "proprietaire";
+// pub const DELEGATION_OWNER: &str = "proprietaire";
 
 pub const ROLE_USAGER: &str = "usager";
-pub const ROLE_NAVIGATEUR: &str = "navigateur";
+// pub const ROLE_NAVIGATEUR: &str = "navigateur";
 
 pub const COMMAND_CLAIM_FILEHOST_VISITS: &str = "claimAndFilehostVisits";
 

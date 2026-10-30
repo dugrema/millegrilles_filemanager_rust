@@ -4,6 +4,7 @@ use crate::external::mq::*;
 use crate::flow::backup::process_backup;
 use crate::flow::commands::process_command;
 use crate::flow::events::process_events;
+use crate::flow::file_events::DelayedEventEmitterService;
 use crate::flow::maintenance::process_ticker_job;
 use crate::flow::requests::process_request;
 use crate::flow::transaction_commands::process_transaction;
@@ -15,16 +16,14 @@ use millegrilles_common_rust::openssl::pkey::{PKey, Private};
 use millegrilles_common_rust::tokio;
 use millegrilles_common_rust::tokio::task::JoinSet;
 use millegrilles_common_rust::tokio_stream::StreamExt;
+use millegrilles_common_rust::tokio_util::sync::CancellationToken;
 use millegrilles_common_rust::tracing::{debug, error, info};
-use millegrilles_common_rust::v3::facades::document_encryption_service::DocumentEncryptionServiceImpl;
 use millegrilles_common_rust::v3::facades::message_inbound::MessageInboundValidator;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::impls::backup_restorer::RestorationState;
 use millegrilles_common_rust::v3::impls::messaging_service::MessagingServiceImpl;
-use millegrilles_common_rust::v3::{BackupService, ChiffrageService, ConfigService, FormatService, MessagingService, PkiService};
+use millegrilles_common_rust::v3::{BackupService, ChiffrageService, ConfigService, FormatService, MessagingService};
 use std::sync::Arc;
-use millegrilles_common_rust::tokio_util::sync::CancellationToken;
-use crate::flow::file_events::DelayedEventEmitterService;
 
 /// Handles queue consumer threads, calls individual routing methods
 pub struct ApplicationService {
@@ -173,8 +172,6 @@ impl ApplicationService {
                 Ok(message) => {
                     let routing = message.message.routage.clone();
                     if let Err(e) = process_request(
-                        self.messaging.as_ref(),
-                        self.format.as_ref(),
                         self.mongo.as_ref(),
                         self.outbound.as_ref(),
                         message

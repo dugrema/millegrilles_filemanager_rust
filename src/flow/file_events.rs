@@ -1,20 +1,15 @@
-use std::borrow::Cow;
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{NodeFichierRepOwned, NodeFichierVersionOwned};
 use crate::external::mq::*;
 use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, sauvegarder_job_video};
-use crate::flow::file_topology::RequeteGetVisitesFuuidsResponse;
 use crate::flow::request_models::ResponseFichierRepVersion;
 use millegrilles_common_rust::bson::doc;
-use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::chrono::{DateTime, Duration, Utc};
-use millegrilles_common_rust::constantes::{DOMAINE_TOPOLOGIE, Securite};
+use millegrilles_common_rust::constantes::Securite;
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
-use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
-use millegrilles_common_rust::mongo_serde::{map_chrono_datetime_as_bson_datetime, option_chrono_04_datetime};
 use millegrilles_common_rust::tokio::select;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tokio_util::sync::CancellationToken;
@@ -24,7 +19,6 @@ use millegrilles_common_rust::{bson, serde_json, tokio};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use millegrilles_common_rust::mongodb::ClientSession;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CollectionEventAggregator {
@@ -131,7 +125,7 @@ impl CollectionEventAggregator {
 }
 
 struct DelayedMessages {
-    cuuid: String,
+    // cuuid: String,
     /// Moment when this batch can be sent
     expiration: DateTime<Utc>,
     message: Option<CollectionEventAggregator>,
@@ -183,7 +177,7 @@ impl DelayedEventEmitterService {
                     if guard.len() < self.max_message_count as usize {
                         // Placeholder used to throttle subsequent messages
                         let delayed = DelayedMessages {
-                            cuuid: cuuid.clone(),
+                            // cuuid: cuuid.clone(),
                             expiration: Utc::now() + self.delay,
                             message: None,
                         };
@@ -216,7 +210,7 @@ impl DelayedEventEmitterService {
         let mut cuuids = Vec::with_capacity(self.max_message_count as usize);
         {
             let now = Utc::now();
-            let mut guard = self.cuuids_buffer.lock().expect("Mutex poisoned");
+            let guard = self.cuuids_buffer.lock().expect("Mutex poisoned");
             if guard.is_empty() {
                 return Ok(());  // Nothing to do
             }
@@ -352,23 +346,23 @@ pub async fn emit_rep_update_event(
     Ok(())
 }
 
-pub async fn update_file_versions_quota(mongo: &dyn MongoDao, user_id: &str, file_size: i64) -> Result<(), CommonError> {
-    // Update/insert the user quota information
-    let collection_quotas = mongo.get_collection(NOM_COLLECTION_QUOTAS_USAGERS)?;
-    let filtre = doc!{ FIELD_USER_ID: user_id };
-    let ops = doc!{
-        "$setOnInsert": { FIELD_DATE_CREATED: bson::datetime::DateTime::now() },
-        "$inc": { "bytes_total_versions": file_size, "nombre_total_versions": 1 },
-        "$currentDate": { FIELD_DATE_MODIFIED: true },
-    };
-
-    collection_quotas
-        .update_one(filtre, ops)
-        .upsert(true)
-        .await?;
-
-    Ok(())
-}
+// pub async fn update_file_versions_quota(mongo: &dyn MongoDao, user_id: &str, file_size: i64) -> Result<(), CommonError> {
+//     // Update/insert the user quota information
+//     let collection_quotas = mongo.get_collection(NOM_COLLECTION_QUOTAS_USAGERS)?;
+//     let filtre = doc!{ FIELD_USER_ID: user_id };
+//     let ops = doc!{
+//         "$setOnInsert": { FIELD_DATE_CREATED: bson::datetime::DateTime::now() },
+//         "$inc": { "bytes_total_versions": file_size, "nombre_total_versions": 1 },
+//         "$currentDate": { FIELD_DATE_MODIFIED: true },
+//     };
+//
+//     collection_quotas
+//         .update_one(filtre, ops)
+//         .upsert(true)
+//         .await?;
+//
+//     Ok(())
+// }
 
 pub async fn marquer_visites_fuuids(
     mongo: &dyn MongoDao,

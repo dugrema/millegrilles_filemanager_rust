@@ -6,25 +6,25 @@ use crate::constants::{COMMAND_CLAIM_FILEHOST_VISITS, DOMAIN_NAME, TRANSACTION_P
 use crate::external::mongo::*;
 use crate::external::mongo_struct::NodeFichierRepOwned;
 use crate::flow::file_events::{DelayedEventEmitterService, declencher_traitement_nouveau_fuuid};
+use crate::flow::transaction_models::PermanentlyDeleteFilesTransaction;
 use crate::models::TypeNode;
-use millegrilles_common_rust::{bson, serde_json};
 use millegrilles_common_rust::bson::doc;
-use millegrilles_common_rust::chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use millegrilles_common_rust::chrono::{DateTime, Duration, Timelike, Utc};
 use millegrilles_common_rust::constantes::{DOMAINE_TOPOLOGIE, Securite};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::jwt_simple::prelude::{Deserialize, Serialize};
 use millegrilles_common_rust::mongo_dao::{ChampIndex, IndexOptions, MongoDao, MongoDaoTyped};
-use millegrilles_common_rust::mongo_serde::{map_chrono_datetime_as_bson_datetime, option_chrono_04_datetime};
+use millegrilles_common_rust::mongo_serde::option_chrono_04_datetime;
 use millegrilles_common_rust::mongodb::ClientSession;
 use millegrilles_common_rust::mongodb::options::Hint;
 use millegrilles_common_rust::tokio;
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
+use millegrilles_common_rust::v3::TransactionService;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
+use millegrilles_common_rust::{bson, serde_json};
 use std::collections::{HashMap, HashSet};
-use millegrilles_common_rust::v3::{ConfigService, TransactionService};
-use crate::flow::transaction_models::PermanentlyDeleteFilesTransaction;
 
 pub async fn maintain_visits_claims<M>(
     transaction: &dyn TransactionService,
@@ -197,7 +197,7 @@ pub async fn claim_all_files<M>(mongo: &M, outbound: &MessageOutboundFacade) -> 
     let mut visits = Vec::with_capacity(VISIT_BATCH_SIZE);
     let mut batch_no = 0;
     while let Some(row) = cursor.next().await {
-        let row = cursor.deserialize_current()?;
+        let row = row?;
         visits.extend(row.fuuids_reclames);
 
         if visits.len() >= VISIT_BATCH_SIZE {
@@ -333,7 +333,7 @@ pub async fn claim_files_under_deleted_cuuids<M>(
     };
     let mut cursor = collection.find(filtre).await?;
     while let Some(row) = cursor.next().await {
-        let row = cursor.deserialize_current()?;
+        let row = row?;
         if let Some(fuuids_versions) = row.fuuids_versions {
             fuuids.extend(fuuids_versions);
         }
@@ -379,42 +379,42 @@ pub async fn claim_files_by_fuuids(outbound: &MessageOutboundFacade, fuuid_batch
     Ok(())
 }
 
-pub async fn claim_files_by_deleted_tuuids<M>(
-    mongo: &M,
-    outbound: &MessageOutboundFacade,
-    user_id: &str,
-    tuuid_batch: &Vec<String>
-) -> Result<(), CommonError> where M: MongoDaoTyped {
-    let type_node_fichier: &str = TypeNode::Fichier.to_str();
-    let mut fuuids = HashSet::new();
-
-    let collection =
-        mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
-
-    let filtre = doc! {
-        FIELD_TUUID: { "$in": tuuid_batch },
-        CHAMP_USER_ID: &user_id,
-        CHAMP_TYPE_NODE: type_node_fichier,
-        CHAMP_SUPPRIME: true,
-        CHAMP_SUPPRIME_INDIRECT: true,
-    };
-    let mut cursor = collection.find(filtre).await?;
-    while let Some(row) = cursor.next().await {
-        let row = cursor.deserialize_current()?;
-        if let Some(fuuids_versions) = row.fuuids_versions {
-            fuuids.extend(fuuids_versions);
-        }
-    }
-
-    // Issue a claim command for all fuuids to restore to CoreTopologie. Ensure none have been deleted.
-    let fuuids: Vec<String> = fuuids.into_iter().collect();
-    for fuuid_batch in fuuids.chunks(100) {
-        debug!("Check batch of fuuids to restore: {:?}", fuuid_batch);
-        claim_files_by_fuuids(outbound, &fuuid_batch.to_vec()).await?;
-    }
-
-    Ok(())
-}
+// pub async fn claim_files_by_deleted_tuuids<M>(
+//     mongo: &M,
+//     outbound: &MessageOutboundFacade,
+//     user_id: &str,
+//     tuuid_batch: &Vec<String>
+// ) -> Result<(), CommonError> where M: MongoDaoTyped {
+//     let type_node_fichier: &str = TypeNode::Fichier.to_str();
+//     let mut fuuids = HashSet::new();
+//
+//     let collection =
+//         mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+//
+//     let filtre = doc! {
+//         FIELD_TUUID: { "$in": tuuid_batch },
+//         CHAMP_USER_ID: &user_id,
+//         CHAMP_TYPE_NODE: type_node_fichier,
+//         CHAMP_SUPPRIME: true,
+//         CHAMP_SUPPRIME_INDIRECT: true,
+//     };
+//     let mut cursor = collection.find(filtre).await?;
+//     while let Some(row) = cursor.next().await {
+//         let row = row?;
+//         if let Some(fuuids_versions) = row.fuuids_versions {
+//             fuuids.extend(fuuids_versions);
+//         }
+//     }
+//
+//     // Issue a claim command for all fuuids to restore to CoreTopologie. Ensure none have been deleted.
+//     let fuuids: Vec<String> = fuuids.into_iter().collect();
+//     for fuuid_batch in fuuids.chunks(100) {
+//         debug!("Check batch of fuuids to restore: {:?}", fuuid_batch);
+//         claim_files_by_fuuids(outbound, &fuuid_batch.to_vec()).await?;
+//     }
+//
+//     Ok(())
+// }
 
 #[derive(Deserialize)]
 pub struct RowFuuidVisit {
@@ -740,7 +740,7 @@ async fn maintain_delete_fichiersrep<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
     let collection = mongo.get_collection_typed::<TuuidRow>(NOM_COLLECTION_FICHIERS_REP)?;
     const BATCH_SIZE: usize = 100;
-    let mut session = mongo.get_session().await?;
+    // let mut session = mongo.get_session().await?;
 
     // Used for batching transactions
     let mut tuuids = Vec::with_capacity(BATCH_SIZE);

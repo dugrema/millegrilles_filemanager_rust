@@ -1,20 +1,18 @@
 use std::collections::HashMap;
 use millegrilles_common_rust::bson;
 use millegrilles_common_rust::bson::{doc, Document};
-use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::FormatChiffrage;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::optionformatchiffragestr;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::{DechiffrageInterMillegrilleOwned, MessageMilleGrillesOwned};
-use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::mongo_dao::MongoDaoTyped;
 use millegrilles_common_rust::tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
 use crate::external::mongo::*;
-use crate::external::mongo_struct::{AudioDetail, CompleteFileRow, FileComment, ImageDetail, MediaOwnedRow, MediaWebSubtitleDetail, NodeFichierRepOwned, NodeFichierVersionOwned, SubtitleDetail, VideoDetail};
-use crate::flow::request_models::{FileCommentResponse, ReponseDocumentsParTuuid, ResponseFichierRepVersion, ResponseVersionCourante};
+use crate::external::mongo_struct::{AudioDetail, CompleteFileRow, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
+use crate::flow::request_models::FileCommentResponse;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionNouvelleCollection {

@@ -14,11 +14,11 @@ use millegrilles_common_rust::mongodb::options::ReturnDocument;
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
 use millegrilles_common_rust::bson::serde_helpers::datetime::FromChrono04DateTime;
 use millegrilles_common_rust::common_messages::ResponseRequestDechiffrageV2Cle;
-use millegrilles_common_rust::mongo_serde::{option_chrono_04_datetime, map_chrono_datetime_as_bson_datetime};
+use millegrilles_common_rust::mongo_serde::option_chrono_04_datetime;
 use millegrilles_common_rust::mongodb::{ClientSession, Collection};
 use millegrilles_common_rust::tokio_stream::StreamExt;
 use millegrilles_common_rust::v3::models::ErrorMessage;
-use millegrilles_common_rust::v3::{ConfigService, TransactionService};
+use millegrilles_common_rust::v3::TransactionService;
 use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{CompleteFileRow, MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned};
@@ -1193,6 +1193,7 @@ pub async fn reactiver_jobs<M>(
             fuuids.push(fuuid.to_owned());
         }
 
+        #[allow(unused)]
         let mut metadata = None;    // Anchor, allows setting reference in JobTrigger
         let trigger: JobTrigger = match action {
             "processIndex" => {
@@ -1261,7 +1262,8 @@ async fn sync_jobs_core_filehosts<M>(
     let request = RequestFilehostsForFuuids { fuuids };
     let response = outbound.send_request(routage, request).await?;
 
-    if let (true, e) = response.is_err()? {
+    // Check if this is an error message - note that success is missing the ok=true (old format)
+    if let Ok((true, e)) = response.is_err() {
         return Err(CommonError::String(format!("sync_jobs_core_filehosts Error in requestFilehostsForFuuids: {:?}", e)))
     }
 

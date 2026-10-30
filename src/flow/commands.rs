@@ -2,19 +2,20 @@ use crate::constants::*;
 use crate::external::mongo::*;
 use crate::external::mongo_struct::{MediaOwnedRow, NodeFichierRepOwned, NodeFichierVersionOwned, StreamTokenRow};
 use crate::external::mq::*;
-use crate::flow::access::{verify_user_access_tuuids, verify_user_certificate};
+use crate::flow::access::verify_user_certificate;
 use crate::flow::file_jobs::{BackgroundJob, BackgroundJobParams, RequestLeaseForBatchOperation, RequestReturnFichiersrepLease, get_batch_of_fichiersrep_leases, get_batch_of_fichiersversion_leases, lease_batch_fichiersrep, reset_indexation, return_fichiersrep_lease, sauvegarder_job_video};
+use crate::flow::file_sharing::get_shared_cuuids_by_userid;
 use crate::flow::file_topology::RequeteGetVisitesFuuidsResponse;
+use crate::flow::file_topology::{claim_all_files, receive_visits};
+use crate::flow::keys::allow_key_decryption;
 use crate::models::TypeNode;
+use millegrilles_common_rust::base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as base64_url_nopad};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::chrono::{Duration, Utc};
-use millegrilles_common_rust::common_messages::RequeteDechiffrage;
 use millegrilles_common_rust::constantes::*;
 use millegrilles_common_rust::error::Error as CommonError;
-use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::CleSecreteMgs4;
-use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_mgs4::CleSecreteCipher::CleSecrete;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
 use millegrilles_common_rust::mongo_dao::{MongoDaoImpl, MongoDaoTyped};
 use millegrilles_common_rust::tracing::{debug, error, info, warn};
@@ -22,7 +23,7 @@ use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::v3::{FormatService, MessagingService};
-use millegrilles_common_rust::{bson, serde_json, tokio};
+use millegrilles_common_rust::{bson, tokio};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -514,13 +515,6 @@ struct CommandCreateFileAccessToken {
     contact_id: Option<String>,
     duration_secs: Option<i64>,
 }
-
-use crate::flow::file_sharing::get_shared_cuuids_by_userid;
-use crate::flow::file_topology::{claim_all_files, receive_visits};
-use crate::flow::keys::allow_key_decryption;
-use millegrilles_common_rust::base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as base64_url_nopad};
-use millegrilles_common_rust::millegrilles_cryptographie::x509::EnveloppeCertificat;
-use millegrilles_common_rust::v3::impls::rabbitmq_consumer::DeliveryInfo;
 
 #[derive(Serialize)]
 struct ResponseCreateStreamToken {

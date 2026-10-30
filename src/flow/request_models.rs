@@ -4,7 +4,7 @@ use millegrilles_common_rust::dechiffrage::DataChiffre;
 use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage::{FormatChiffrage, optionformatchiffragestr};
 use millegrilles_common_rust::millegrilles_cryptographie::chiffrage_docs::EncryptedDocument;
-use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_milliseconds, ts_seconds_option};
+use millegrilles_common_rust::chrono::serde::{ts_seconds, ts_seconds_option};
 use millegrilles_common_rust::millegrilles_cryptographie::serde_dates::mapstringepochseconds;
 use serde::Serialize;
 use crate::external::mongo_struct::{AudioDetail, FileComment, ImageDetail, MediaWebSubtitleDetail, NodeFichierRepOwned, SubtitleDetail, VideoDetail};
