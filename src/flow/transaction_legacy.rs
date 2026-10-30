@@ -51,6 +51,7 @@ pub async fn legacy_deplacer_fichiers_collection<M>(
         true,
         &mut session
     ).await?;
+    session.commit_transaction().await?;
 
     // Check that the destination is not under the source (moving under itself breaks the graph)
     if let Some(directory_moves) = result.directories.as_ref() {
