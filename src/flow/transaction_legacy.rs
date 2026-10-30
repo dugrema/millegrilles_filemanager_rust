@@ -10,7 +10,7 @@ use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
 use millegrilles_common_rust::error::Error as CommonError;
 use millegrilles_common_rust::hachages::hacher_bytes;
-use millegrilles_common_rust::mongodb::options::{Hint, UpdateManyModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::mongodb::options::{DeleteManyModel, Hint, UpdateManyModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::multibase::Base;
 use millegrilles_common_rust::multihash::Code;
 use millegrilles_common_rust::tokio_stream::StreamExt;
@@ -880,4 +880,80 @@ async fn recuperer_tuuids<M>(
     }
 
     Ok(models)
+}
+
+#[derive(Deserialize)]
+pub struct TransactionSupprimerOrphelins {
+    pub fuuids: Vec<String>,
+}
+
+pub async fn legacy_supprimer_orphelins<M>(
+    mongo: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
+    debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
+
+    let transaction_value: TransactionSupprimerOrphelins = wrapper.message.deserialize()?;
+
+    let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let collection_media = mongo.get_collection(NOM_COLLECTION_MEDIA)?;
+
+    let mut models = Vec::with_capacity(transaction_value.fuuids.len() * 4);
+
+    // Delete all matching media
+    let filtre_versions = doc!{ FIELD_FUUID: {"$in": &transaction_value.fuuids} };
+    models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_media.namespace())
+                .filter(filtre_versions)
+                .build()
+        )
+    );
+
+    // Delete all matching versions
+    let filtre_versions = doc!{ FIELD_FUUID: {"$in": &transaction_value.fuuids} };
+    models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_versions.namespace())
+                .filter(filtre_versions)
+                .build()
+        )
+    );
+
+    // Remove versions from all filereps
+    let filtre_reps = doc!{ FIELD_FUUIDS_VERSIONS: {"$in": &transaction_value.fuuids} };
+    let ops_reps = doc! {
+        "$pullAll": { FIELD_FUUIDS_VERSIONS: &transaction_value.fuuids },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_reps.namespace())
+                .filter(filtre_reps)
+                .build()
+        )
+    );
+
+    // Final cleanup for all filereps that are deleted and with no fileversions left.
+    let filtre_delete_reps = doc!{
+        FIELD_DELETED: true,
+        FIELD_FUUIDS_VERSION_0: {"exists": false},
+        FIELD_NODE_TYPE: TypeNode::Fichier.to_str()
+    };
+    models.push(
+        WriteModel::DeleteMany(
+            DeleteManyModel::builder()
+                .namespace(collection_reps.namespace())
+                .filter(filtre_delete_reps)
+                .build()
+        )
+    );
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+    Ok(aggregator)
 }
