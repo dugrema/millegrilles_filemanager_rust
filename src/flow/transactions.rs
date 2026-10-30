@@ -119,7 +119,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_RECYCLE_ITEMS_V3 => todo!("legacy"),
             TRANSACTION_DEPLACER_FICHIERS_COLLECTION => legacy_deplacer_fichiers_collection(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_RECUPERER_DOCUMENTS_V2 => legacy_recuperer_documents_v2(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_COPY_V2 => todo!("legacy"),
+            TRANSACTION_COPY_V2 => legacy_copy_v2(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_ORPHELINS => legacy_supprimer_orphelins(self.mongo.as_ref(), wrapper).await,
 
             // Obsolete transactions - keep to avoid getting an error on rebuild

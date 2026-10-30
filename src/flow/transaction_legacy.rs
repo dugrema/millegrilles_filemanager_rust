@@ -2,15 +2,17 @@
 // Needed for restoration of backups (redo-log).
 
 use std::collections::{HashMap, HashSet};
-use millegrilles_common_rust::{bson, serde_json};
+use millegrilles_common_rust::{bson, hex, serde_json};
 use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
-use millegrilles_common_rust::chrono::Utc;
+use millegrilles_common_rust::chrono::{DateTime, Utc};
 use millegrilles_common_rust::mongo_dao::{MongoDao, MongoDaoTyped};
 use millegrilles_common_rust::v3::models::{ErrorMessage, TransactionOperationAggregator, TransactionWrapper};
 use millegrilles_common_rust::error::Error as CommonError;
-use millegrilles_common_rust::hachages::hacher_bytes;
-use millegrilles_common_rust::mongodb::options::{DeleteManyModel, Hint, UpdateManyModel, UpdateOneModel, WriteModel};
+use millegrilles_common_rust::hachages::{hacher_bytes, hacher_bytes_vu8};
+use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageMilleGrillesOwned;
+use millegrilles_common_rust::mongodb::Cursor;
+use millegrilles_common_rust::mongodb::options::{DeleteManyModel, Hint, InsertOneModel, UpdateManyModel, UpdateOneModel, WriteModel};
 use millegrilles_common_rust::multibase::Base;
 use millegrilles_common_rust::multihash::Code;
 use millegrilles_common_rust::tokio_stream::StreamExt;
@@ -24,7 +26,7 @@ use crate::external::mongo_struct::{ContactRow, MediaOwnedRow, NodeFichierRepOwn
 use crate::flow::directories::{get_path_cuuid, RowRepertoirePaths, parse_selection_directories};
 use crate::flow::file_events::CollectionEventAggregator;
 use crate::flow::transaction_commands::{process_transaction, TransactionAjouterFichiersCollection, TransactionDeplacerFichiersCollection};
-use crate::flow::transaction_models::{TransactionDeleteV3, TransactionMoveV2};
+use crate::flow::transaction_models::{TransactionDeleteV3, TransactionMoveV2, TransactionMoveV2Directory};
 use crate::flow::transactions::{delete_file_reps_v3, move_files_collections};
 use crate::models::TypeNode;
 
@@ -125,7 +127,7 @@ pub async fn legacy_ajouter_fichiers_collection<M>(
     debug!("transaction_ajouter_fichiers_collection Copier fichiers user_id {} (vers {:?})", user_id_origine, user_id_destination);
 
     // Dupliquer la structure de repertoires
-    if let Err(e) = dupliquer_structure_repertoires(
+    let models = match dupliquer_structure_repertoires(
         mongo,
         uuid_transaction,
         &transaction_collection.cuuid,
@@ -133,11 +135,13 @@ pub async fn legacy_ajouter_fichiers_collection<M>(
         user_id_origine.as_str(),
         user_id_destination,
     ).await {
-        Err(format!("grosfichiers.transaction_ajouter_fichiers_collection Erreur dupliquer_structure_repertoires sur transaction : {:?}", e))?
-    }
+        Ok(inner) => inner,
+        Err(e) => return Err(CommonError::String(format!("grosfichiers.transaction_ajouter_fichiers_collection Erreur dupliquer_structure_repertoires sur transaction : {:?}", e)))
+    };
 
     let mut aggregator = TransactionOperationAggregator::new();
-    aggregator.legacy = true;  // Forces a commit after
+    // aggregator.legacy = true;  // Forces a commit after
+    aggregator.ordered = Some(models);
     Ok(aggregator)
 }
 
@@ -156,7 +160,7 @@ async fn dupliquer_structure_repertoires<M>(
     tuuids: &Vec<String>,
     user_id: &str,
     user_id_destination: Option<String>
-) -> Result<(), CommonError> where M: MongoDaoTyped {
+) -> Result<Vec<WriteModel>, CommonError> where M: MongoDaoTyped {
     let user_id_destination = match user_id_destination.as_ref() {
         Some(inner) => inner.as_ref(),
         None => user_id
@@ -170,6 +174,8 @@ async fn dupliquer_structure_repertoires<M>(
         mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
     let collection_versions =
         mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+
+    let mut models = Vec::with_capacity(100);
 
     loop {
         let fichier_rep_tuuid = match tuuids_remaining.pop() {
@@ -240,13 +246,16 @@ async fn dupliquer_structure_repertoires<M>(
                 "$currentDate": { FIELD_DATE_MODIFIED: true }
             };
             debug!("dupliquer_structure_repertoires Upsert entry: {:?}", ops);
-            let result = collection_reps
-                .update_one(filtre, ops)
-                .upsert(true)
-                .await?;
-            if result.upserted_id.is_none() {
-                info!("dupliquer_structure_repertoires Erreur, aucune valeur upserted pour tuuid {}", tuuid_src);
-            }
+            models.push(
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(collection_reps.namespace())
+                        .filter(filtre)
+                        .update(ops)
+                        .upsert(true)
+                        .build()
+                )
+            );
 
             match type_node {
                 TypeNode::Fichier => {
@@ -254,10 +263,19 @@ async fn dupliquer_structure_repertoires<M>(
                         // Copier les versions des fichiers vers le user_id destination
                         let filtre = doc!{CHAMP_TUUIDS: &tuuid_src};
                         let ops = doc!{"$addToSet": {"tuuids": &nouveau_tuuid}, "$currentDate": {FIELD_DATE_MODIFIED: true}};
-                        collection_versions.update_many(filtre, ops).await?;
+                        models.push(
+                            WriteModel::UpdateMany(
+                                UpdateManyModel::builder()
+                                    .namespace(collection_versions.namespace())
+                                    .filter(filtre)
+                                    .update(ops)
+                                    .build()
+                            )
+                        );
 
                         if let Some(fuuids_versions) = fichier_rep.fuuids_versions.clone() {
-                            copy_media_file(mongo, user_id_destination, user_id, fuuids_versions).await?;
+                            let operations = copy_media_file(mongo, user_id_destination, user_id, fuuids_versions).await?;
+                            models.extend(operations);
                         }
                     }
                 },
@@ -286,17 +304,19 @@ async fn dupliquer_structure_repertoires<M>(
         }
     }
 
-    Ok(())
+    Ok(models)
 }
 
 async fn copy_media_file<M>(
-    middleware: &M,
+    mongo: &M,
     user_id: &str,
     original_user_id: &str,
     fuuids_versions: Vec<String>
-) -> Result<(), CommonError> where M: MongoDaoTyped {
+) -> Result<Vec<WriteModel>, CommonError> where M: MongoDaoTyped {
     debug!("copy_media_file fuuids_versions: {:?}, user_id: {:?}", fuuids_versions, user_id);
-    let collection_media = middleware.get_collection_typed::<MediaOwnedRow>(NOM_COLLECTION_MEDIA)?;
+    let collection_media = mongo.get_collection_typed::<MediaOwnedRow>(NOM_COLLECTION_MEDIA)?;
+
+    let mut models = Vec::new();
 
     let filtre_media = doc! {"fuuid": {"$in": &fuuids_versions}, "user_id": original_user_id};
     let mut cursor = collection_media.find(filtre_media).await?;
@@ -341,12 +361,18 @@ async fn copy_media_file<M>(
             }
         }
         debug!("copy_media_file ops {:?}", ops);
-        collection_media
-            .update_one(filtre, ops)
-            .upsert(true)
-            .await?;
+        models.push(
+            WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(collection_media.namespace())
+                    .filter(filtre)
+                    .update(ops)
+                    .upsert(true)
+                    .build()
+            )
+        );
     }
-    Ok(())
+    Ok(models)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -956,4 +982,211 @@ pub async fn legacy_supprimer_orphelins<M>(
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(models);
     Ok(aggregator)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TransactionCopyV2 {
+    pub command: MessageMilleGrillesOwned,
+    pub destination: Vec<String>,
+    pub directories: Option<Vec<TransactionMoveV2Directory>>,
+    pub files: Option<Vec<String>>,
+    pub user_id: String,
+    pub include_deleted: Option<bool>,
+}
+
+fn digest_new_tuuid(transaction_id_bytes: &Vec<u8>, old_tuuid: &str) -> String {
+    let mut bytes_to_hash = old_tuuid.as_bytes().to_vec();
+    bytes_to_hash.extend(transaction_id_bytes);
+    let digest_value = hacher_bytes_vu8(&bytes_to_hash[..], Some(Code::Blake2s256));
+    hex::encode(digest_value)
+}
+
+pub async fn legacy_copy_v2<M>(
+    middleware: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
+{
+    debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(id) => id,
+        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+    };
+
+    let transaction_value: TransactionCopyV2 = wrapper.message.deserialize()?;
+    let created = wrapper.message.estampille.clone();
+
+    let include_deleted = transaction_value.include_deleted.unwrap_or(false);
+
+    let collection_reps =
+        middleware.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+
+    let transaction_id = wrapper.message.id.clone();
+    let transaction_id_bytes = hex::decode(&transaction_id)?;
+
+    let mut models = Vec::new();
+
+    if let Some(files) = transaction_value.files {
+        let destination = &transaction_value.destination;
+        let filtre = doc!{"tuuid": {"$in": &files}};
+        let cursor_reps = collection_reps.find(filtre.clone()).await?;
+        match copy_files_to_directory(middleware, user_id.as_str(), &created, cursor_reps, destination, &transaction_id_bytes).await {
+            Ok(inner) => models.extend(inner),
+            Err(err) => return Err(err)
+        }
+    }
+
+    if let Some(directories) = transaction_value.directories {
+        // Prepare a mapping for all the new directory tuuids - will be used to adjust the new path_cuuids.
+        let mut new_cuuid_map = HashMap::new();
+        for copy_directories in &directories {
+            for directory in &copy_directories.directories {
+                let new_directory_tuuid = digest_new_tuuid(&transaction_id_bytes, directory.as_str());
+                new_cuuid_map.insert(directory, new_directory_tuuid);
+            }
+        }
+
+        // Copy files and directories
+        for copy_directories in &directories {
+            for directory in &copy_directories.directories {
+                let mut destination: Vec<String> = copy_directories.path.iter()
+                    .map(|s| {
+                        match new_cuuid_map.get(s) {
+                            Some(inner) => inner.to_string(),  // New cuuid
+                            None => s.to_string()  // Keep old cuuid (part of destination parent hierarchy)
+                        }
+                    })
+                    .collect();
+                // Copy the directory entry
+                let filtre = doc!{"tuuid": &directory};
+                let mut cursor_reps = collection_reps.find(filtre.clone()).await?;
+                let new_tuuid = new_cuuid_map.get(&directory).expect("get new tuuid");
+                if cursor_reps.advance().await? {
+                    let mut row = cursor_reps.deserialize_current()?;
+                    row.tuuid = new_tuuid.clone();
+                    row.user_id = user_id.clone();  // In case this is a copy from shared collections
+                    row.path_cuuids = Some(destination.clone());
+                    row.type_node = TypeNode::Repertoire.to_str().to_string();  // It is possible to copy a Collection to another one
+                    row.flag_index = false;  // Need to index new path
+                    row.created = created.clone();
+                    row.modified = Utc::now();
+
+                    // Remove deleted flags if present. Allows copying out of Trash.
+                    row.supprime = false;
+                    row.supprime_indirect = false;
+
+                    // Insert the directory with the updated identifiers
+                    debug!("transaction_copy_v2 Copy (directories) tuuid {} to {}", directory, row.tuuid);
+                    models.push(
+                        WriteModel::InsertOne(
+                            InsertOneModel::builder()
+                                .namespace(collection_reps.namespace())
+                                .document(bson::serialize_to_document(&row)?)
+                                .build()
+                        )
+                    );
+                } else {
+                    error!("transaction_copy_v2 Directory {} not found during copy, skipping", directory);
+                    continue
+                }
+
+                // Copy all files
+                destination.insert(0, new_tuuid.clone());  // Prepend parent directory for files
+                let mut filtre = doc!{
+                    FIELD_PATH_CUUIDS_0: &directory,
+                    FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
+                };
+                if include_deleted {
+                    // Include files that have been indirectly deleted (deleted with the directory)
+                    filtre.insert("$or", vec![
+                        doc!{CHAMP_SUPPRIME: false},
+                        doc!{CHAMP_SUPPRIME_INDIRECT: true},
+                    ]);
+                } else {
+                    // Exclude all deleted files
+                    filtre.insert("supprime", false);
+                }
+                let cursor_reps = collection_reps.find(filtre.clone()).await?;
+                copy_files_to_directory(middleware, user_id.as_str(), &created, cursor_reps, &destination, &transaction_id_bytes).await?;
+            }
+        }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+    Ok(aggregator)
+}
+
+async fn copy_files_to_directory<M>(
+    middleware: &M, user_id: &str, created: &DateTime<Utc>, mut cursor_reps: Cursor<NodeFichierRepOwned>,
+    destination: &Vec<String>, transaction_id_bytes: &Vec<u8>) -> Result<Vec<WriteModel>, CommonError>
+where M: MongoDaoTyped
+{
+    let collection_reps =
+        middleware.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let collection_versions =
+        middleware.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+
+    let now = Utc::now();
+
+    let mut models = Vec::new();
+
+    while cursor_reps.advance().await? {
+        let mut row = cursor_reps.deserialize_current()?;
+        let original_user_id = row.user_id.clone();
+        let change_user = original_user_id.as_str() != user_id;
+
+        let old_tuuid = row.tuuid.clone();
+
+        // Update path_cuuids and identifier. Then re-insert.
+        // Hash the old tuuid and the current transaction id with blake2s to get a new unique tuuid.
+        let new_tuuid = digest_new_tuuid(transaction_id_bytes, row.tuuid.as_str());
+        row.tuuid = new_tuuid.clone();
+        row.user_id = user_id.to_string();  // We may be copying from shared collections
+        row.path_cuuids = Some(destination.to_owned());
+        row.flag_index = false;  // Need to index new path
+        row.created = created.clone();
+        row.modified = now.clone();
+
+        // Remove deleted flags. Allows copying out of the Trash area.
+        row.supprime = false;
+        row.supprime_indirect = false;
+
+        let fuuids_versions = row.fuuids_versions.clone();
+
+        // Insert the row with the updated identifiers
+        debug!("transaction_copy_v2 Copy (files-1) tuuid {} to {}", old_tuuid, row.tuuid);
+        models.push(
+            WriteModel::InsertOne(
+                InsertOneModel::builder()
+                    .namespace(collection_reps.namespace())
+                    .document(bson::serialize_to_document(&row)?)
+                    .build()
+            )
+        );
+
+        // Add tuuid to versions
+        if let Some(fuuids_versions) = fuuids_versions {
+            let filtre_versions = doc! {"fuuid": {"$in": &fuuids_versions}};
+            let ops = doc! { "$addToSet": {"tuuids": &new_tuuid}, "$currentDate": { FIELD_DATE_MODIFIED: true } };
+            debug!("transaction_copy_v2 Filtre {:?}, ops: {:?}", filtre_versions, ops);
+            models.push(
+                WriteModel::UpdateMany(
+                    UpdateManyModel::builder()
+                        .namespace(collection_versions.namespace())
+                        .filter(filtre_versions)
+                        .update(ops)
+                        .build()
+                )
+            );
+
+            if change_user {
+                match copy_media_file(middleware, user_id, original_user_id.as_str(), fuuids_versions).await {
+                    Ok(inner) => models.extend(inner),
+                    Err(e) => return Err(CommonError::String(format!("Error in copy_media_file: {:?}", e)))
+                }
+            }
+        }
+    }
+
+    Ok(models)
 }
