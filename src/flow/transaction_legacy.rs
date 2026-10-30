@@ -678,3 +678,206 @@ pub async fn legacy_supprimer_video<M>(
     aggregator.ordered = Some(models);
     Ok(aggregator)
 }
+
+#[derive(Deserialize)]
+pub struct TransactionRecupererDocumentsV2 {
+    /// Items a recuperer par { cuuid: [tuuid, ...] }
+    pub items: HashMap<String, Option<Vec<String>>>
+}
+
+pub async fn legacy_recuperer_documents_v2<M>(
+    mongo: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
+{
+    debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(id) => id,
+        None => return Err(CommonError::Str("User_id missing from certificate in new_collection transaction"))
+    };
+
+    let transaction_value: TransactionRecupererDocumentsV2 = wrapper.message.deserialize()?;
+
+    let mut models: Vec<WriteModel> = Vec::with_capacity(100);
+
+    for (cuuid, paths) in transaction_value.items {
+        // Recuperer le cuuid (parent) jusqu'a la racine au besoin
+        debug!("transaction_recuperer_documents_v2 Recuperer cuuid {} et parents", cuuid);
+        match recuperer_parents(mongo, &user_id, &cuuid).await {
+            Ok(inner) => models.extend(inner),
+            Err(e) => return Err(CommonError::String(format!("grosfichiers.transaction_recuperer_documents_v2 Erreur recuperer_parents : {:?}", e)))
+        }
+
+        // Reactiver les fichiers avec le cuuid courant sous cuuids_supprimes.
+        debug!("transaction_recuperer_documents_v2 Recuperer tuuids {:?} sous cuuid {}", paths, cuuid);
+        match recuperer_tuuids(mongo, &user_id, cuuid.as_str(), paths).await {
+            Ok(inner) => models.extend(inner),
+            Err(e) => return Err(CommonError::String(format!("grosfichiers.transaction_recuperer_documents_v2 Erreur recuperer_tuuids : {:?}", e)))
+        }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+    Ok(aggregator)
+}
+
+async fn recuperer_parents<M>(mongo: &M, user_id: &str, tuuid: &str) -> Result<Vec<WriteModel>, CommonError>
+where M: MongoDaoTyped
+{
+    let filtre = doc!{ CHAMP_TUUID: tuuid, CHAMP_USER_ID: user_id };
+    let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let repertoire = match collection.find_one(filtre).await? {
+        Some(inner) => inner,
+        None => Err(format!("recuperer_parents Tuuid inconnu {}", tuuid))?
+    };
+
+    // let type_node = match repertoire.type_node {
+    //     Some(inner) => TypeNode::try_from(inner.as_str())?,
+    //     None => Err(format!("recuperer_parents Node sans information de type {}", tuuid))?
+    // };
+    let type_node = TypeNode::try_from(repertoire.type_node.as_str())?;
+
+    let cuuids = match type_node {
+        TypeNode::Fichier => Err(format!("recuperer_parents Node {} de type Fichier, invalide pour reactiver parents", tuuid))?,
+        TypeNode::Collection => {
+            // Ok, aucuns parents a reactiver
+            vec![tuuid.to_owned()]
+        },
+        TypeNode::Repertoire => {
+            match repertoire.path_cuuids {
+                Some(mut inner) => {
+                    inner.push(tuuid.to_owned());  // Ajouter le repertoire lui-meme
+                    inner
+                },
+                None => Err(format!("recuperer_parents Node {} est un Repertoire sans path_cuuids, invalide pour reactiver parents", tuuid))?,
+            }
+        }
+    };
+
+    let filtre = doc! { CHAMP_TUUID: {"$in": cuuids} };
+    let ops = doc! {
+        "$set": {
+            CHAMP_SUPPRIME: false,
+            CHAMP_SUPPRIME_INDIRECT: false,
+        },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
+    let mut models = Vec::new();
+
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection.namespace())
+                .filter(filtre)
+                .update(ops)
+                .build()
+        )
+    );
+
+    Ok(models)
+}
+
+
+async fn recuperer_tuuids<M>(
+    mongo: &M,
+    user_id: &str,
+    cuuid: &str,
+    tuuids_params: Option<Vec<String>>,
+) -> Result<Vec<WriteModel>, CommonError> where M: MongoDaoTyped {
+    let tuuids: Vec<String> = match tuuids_params {
+        Some(inner) => inner,
+        None => vec![cuuid.to_owned()]  // Recuperer une collection
+    };
+
+    debug!("recuperer_tuuids Recuperer tuuids {:?}", tuuids);
+    let mut nodes_restants = Vec::new();
+
+    // Charger liste initiale de nodes
+    let collection_reps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    {
+        let filtre = doc! {
+            CHAMP_TUUID: { "$in": tuuids },
+            CHAMP_USER_ID: user_id
+        };
+        let mut curseur = collection_reps.find(filtre).await?;
+        while curseur.advance().await? {
+            let row = curseur.deserialize_current()?;
+            nodes_restants.push(row);
+        }
+    }
+
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+
+    // Parcourir les nodes. Recuperer recursivement les Repertoires avec supprime_indirect: true.
+    let mut models = Vec::new();
+    let mut tuuids_a_recuperer = Vec::new();
+    // let mut fuuids_a_recuperer = Vec::new();
+    loop {
+        let node_courant = match nodes_restants.pop() {
+            Some(inner) => inner,
+            None => { break; }  // Termine
+        };
+
+        let type_node = TypeNode::try_from(node_courant.type_node.as_str())?;
+
+        match type_node {
+            TypeNode::Fichier => {
+                if let Some(fuuids) = node_courant.fuuids_versions {
+                    // fuuids_a_recuperer.extend(fuuids);
+                    debug!("recuperer_tuuids Recuperer {} fuuids", fuuids.len());
+                    let filtre = doc! {CHAMP_FUUID: {"$in": fuuids}};
+                    let ops = doc! {
+                        // "$set": { CHAMP_SUPPRIME: false },
+                        "$addToSet": {"tuuids": &node_courant.tuuid},
+                        "$currentDate": { FIELD_DATE_MODIFIED: true }
+                    };
+                    models.push(
+                        WriteModel::UpdateMany(
+                            UpdateManyModel::builder()
+                                .namespace(collection_versions.namespace())
+                                .filter(filtre)
+                                .update(ops)
+                                .build()
+                        )
+                    );
+                }
+            },
+            TypeNode::Collection | TypeNode::Repertoire => {
+                // Charger la liste des nodes supprimes indirectement sous ce repertoire
+                let filtre = doc! {
+                    CHAMP_USER_ID: user_id,
+                    "path_cuuids.0": &node_courant.tuuid,
+                    CHAMP_SUPPRIME_INDIRECT: true
+                };
+                let mut curseur = collection_reps.find(filtre).await?;
+                while curseur.advance().await? {
+                    let row = curseur.deserialize_current()?;
+                    nodes_restants.push(row);
+                }
+            }
+        }
+
+        tuuids_a_recuperer.push(node_courant.tuuid);
+    }
+
+    {
+        debug!("recuperer_tuuids Recuperer {} tuuids", tuuids_a_recuperer.len());
+        let filtre = doc! { CHAMP_USER_ID: user_id, CHAMP_TUUID: {"$in": tuuids_a_recuperer}};
+        let ops = doc! {
+            "$set": {CHAMP_SUPPRIME: false, CHAMP_SUPPRIME_INDIRECT: false },
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection_reps.namespace())
+                    .filter(filtre)
+                    .update(ops)
+                    .build()
+            )
+        );
+    }
+
+    Ok(models)
+}
