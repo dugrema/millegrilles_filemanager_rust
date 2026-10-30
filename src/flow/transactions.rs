@@ -116,7 +116,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
             TRANSACTION_DELETE_V2 => legacy_delete_v2(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_DOCUMENTS => legacy_supprimer_documents(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_SUPPRIMER_VIDEO => legacy_supprimer_video(self.mongo.as_ref(), wrapper).await,
-            TRANSACTION_RECYCLE_ITEMS_V3 => todo!("legacy"),
+            TRANSACTION_RECYCLE_ITEMS_V3 => legacy_recycle_items_v3(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_DEPLACER_FICHIERS_COLLECTION => legacy_deplacer_fichiers_collection(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_RECUPERER_DOCUMENTS_V2 => legacy_recuperer_documents_v2(self.mongo.as_ref(), wrapper).await,
             TRANSACTION_COPY_V2 => legacy_copy_v2(self.mongo.as_ref(), wrapper).await,

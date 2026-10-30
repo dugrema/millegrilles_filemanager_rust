@@ -1382,3 +1382,138 @@ async fn delete_file_versions_from_directories<M>(
 
     Ok(models)
 }
+
+#[derive(Deserialize)]
+pub struct TransactionRecycleItemsV3 {
+    /// Original command
+    pub command: MessageMilleGrillesOwned,
+
+    /// User Id
+    pub user_id: String,
+
+    /// Files to restore.
+    pub file_tuuids: Vec<String>,
+
+    /// Directories to restore.
+    /// All files with supprime_indirect == true in those directories will be restored.
+    pub directory_tuuids: Vec<String>
+}
+
+pub async fn legacy_recycle_items_v3<M>(
+    mongo: &M,
+    mut wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
+{
+    debug!("legacy_deplacer_fichiers_collection id:{}", wrapper.message.id);
+    let transaction_value: TransactionRecycleItemsV3 = wrapper.message.deserialize()?;
+
+    let user_id = match wrapper.certificate.get_user_id()? {
+        Some(id) => id,
+        None => transaction_value.user_id.clone(),  // return Err(CommonError::Str("User_id missing from certificate in legacy_recycle_items_v3 transaction"))
+    };
+
+    let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+
+    let mut models = Vec::new();
+
+    if transaction_value.file_tuuids.len() > 0 {
+        let operations = recycle_files(mongo, user_id.as_str(), &transaction_value.file_tuuids).await?;
+        models.extend(operations);
+    }
+
+    if transaction_value.directory_tuuids.len() > 0 {
+        // Recover directories
+        let filtre_directory = doc!{CHAMP_TUUID: {"$in": &transaction_value.directory_tuuids}, CHAMP_USER_ID: &user_id};
+        let ops = doc!{
+            "$set": { FIELD_DELETED: false, FIELD_DELETED_INDIRECT: false },
+            "$currentDate": { FIELD_DATE_MODIFIED: true },
+        };
+        models.push(
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection.namespace())
+                    .filter(filtre_directory)
+                    .update(ops)
+                    .build()
+            )
+        );
+
+        // Recover files directly under each directory (indirectly deleted)
+        let filtre_files = doc!{
+            FIELD_PATH_CUUIDS_0: {"$in": &transaction_value.directory_tuuids},
+            FIELD_USER_ID: &user_id,
+            FIELD_DELETED: true,
+            FIELD_DELETED_INDIRECT: true,
+        };
+        let mut cursor = collection.find(filtre_files).await?;
+        let mut file_tuuids = Vec::new();
+        while cursor.advance().await? {
+            let row = cursor.deserialize_current()?;
+            file_tuuids.push(row.tuuid.to_string());
+        }
+
+        // Process files in batches
+        for file_batch in file_tuuids.chunks(100) {
+            let operations = recycle_files(mongo, user_id.as_str(), file_batch).await?;
+            models.extend(operations);
+        }
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    aggregator.ordered = Some(models);
+    Ok(aggregator)
+}
+
+async fn recycle_files<M>(middleware: &M, user_id: &str, files: &[String]) -> Result<Vec<WriteModel>, CommonError>
+where M: MongoDaoTyped
+{
+    let collection = middleware.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+    let collection_versions = middleware.get_collection(NOM_COLLECTION_VERSIONS)?;
+
+    let mut models = Vec::new();
+
+    // Rebuild the link from version to file.
+    let filtre_filerep = doc!{CHAMP_TUUID: {"$in": files}, CHAMP_USER_ID: &user_id};
+    let mut cursor = collection.find(filtre_filerep.clone()).await?;
+    while cursor.advance().await? {
+        let row = cursor.deserialize_current()?;
+        if let Some(fuuids) = row.fuuids_versions {
+            let filtre = doc! {
+                CHAMP_FUUID: {"$in": fuuids},
+            };
+            let ops = doc!{
+                "$addToSet": { CHAMP_TUUIDS: row.tuuid },
+                "$currentDate": { FIELD_DATE_MODIFIED: true },
+            };
+            models.push(
+                WriteModel::UpdateMany(
+                    UpdateManyModel::builder()
+                        .namespace(collection_versions.namespace())
+                        .filter(filtre)
+                        .update(ops)
+                        .build()
+                )
+            );
+        }
+    }
+
+    // Mark all files as no longer deleted.
+    let ops = doc! {
+        "$set": {
+            CHAMP_SUPPRIME: false,
+            CHAMP_SUPPRIME_INDIRECT: false
+        },
+        "$currentDate": { FIELD_DATE_MODIFIED: true }
+    };
+    models.push(
+        WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(collection.namespace())
+                .filter(filtre_filerep)
+                .update(ops)
+                .build()
+        )
+    );
+
+    Ok(models)
+}
