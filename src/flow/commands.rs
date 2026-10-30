@@ -81,6 +81,7 @@ async fn command_lease_files_for_image<M>(
     outbound: &MessageOutboundFacade,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
+    debug!("Command lease files for image");
     let request: RequestLeaseForBatchOperation = wrapper.message.deserialize()?;
 
     if ! wrapper.certificate.verifier_roles_string(vec![ROLE_MEDIA.to_string()])? {

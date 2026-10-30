@@ -456,9 +456,16 @@ async fn lease_file_version(
     };
 
     let collection = middleware.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
-    match collection.update_one(filtre, ops).await {
+    match collection
+        .update_one(filtre, ops)
+        .upsert(true)
+        .await
+    {
         Ok(result) => Ok(result.modified_count == 1 || result.upserted_id.is_some()),
-        Err(_) => Ok(false)
+        Err(_) => {
+            // warn!("lease_file_version error borrowing fuuid:{} (flag {}): {:?}", fuuid, borrower, e);
+            Ok(false)
+        }
     }
 }
 
@@ -673,7 +680,10 @@ async fn lease_file(
     {
         // Returns true when a lease record is added or updated - this means the lease is successful
         Ok(result) => Ok(result.modified_count == 1 || result.upserted_id.is_some()),
-        Err(_) => Ok(false),
+        Err(_) => {
+            // warn!("lease_file error borrowing tuuid:{} (flag {}): {:?}", tuuid, borrower, e);
+            Ok(false)
+        },
     }
 }
 
