@@ -216,7 +216,7 @@ pub async fn claim_all_files<M>(mongo: &M, outbound: &MessageOutboundFacade) -> 
                 Err(format!("Error claiming files, aborting: {:?}", reponse.err))?;
             }
 
-            debug!("claim_all_files Batch {} of {} fuuids claimed", batch_no, visits.len());
+            // debug!("claim_all_files Batch {} of {} fuuids claimed", batch_no, visits.len());
             visits.clear();
             batch_no += 1;
         }

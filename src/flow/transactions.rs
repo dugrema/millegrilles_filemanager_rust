@@ -492,7 +492,6 @@ async fn associate_file_conversions<M>(
     let filtre_versions = doc!{ FIELD_FUUID: &transaction.fuuid };
     let update_model_versions = WriteModel::UpdateOne(
         UpdateOneModel::builder()
-            .upsert(true)
             .namespace(collection_versions.namespace())
             .filter(filtre_versions)
             .update(ops)
@@ -544,7 +543,6 @@ async fn update_file_metadata(
         let ops = doc!{ "$set": { FIELD_MIMETYPE: mimetype }, "$currentDate": { FIELD_DATE_MODIFIED: true } };
         let update_model_versions = WriteModel::UpdateOne(
             UpdateOneModel::builder()
-                .upsert(true)
                 .namespace(collection_versions.namespace())
                 .filter(filter)
                 .update(ops)
@@ -562,7 +560,6 @@ async fn update_file_metadata(
     let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
     let update_model_versions = WriteModel::UpdateOne(
         UpdateOneModel::builder()
-            .upsert(true)
             .namespace(collection_reps.namespace())
             .filter(filter_reps)
             .update(ops)
@@ -604,7 +601,6 @@ async fn update_collection_metadata(
     let collection = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
     let update_model_versions = WriteModel::UpdateOne(
         UpdateOneModel::builder()
-            .upsert(true)
             .namespace(collection.namespace())
             .filter(filter)
             .update(ops)

@@ -314,10 +314,10 @@ pub async fn get_complete_files(
     while cursor.advance().await? {
         let row = cursor.deserialize_current()?;
         let tuuid = row.get_str("tuuid").unwrap_or("UNKNOWN").to_string();
-        let row: CompleteFileRow = match bson::deserialize_from_document(row) {
+        let row: CompleteFileRow = match bson::deserialize_from_document(row.clone()) {
             Ok(inner) => inner,
             Err(e) => {
-                warn!("get_complete_files Deserialization error on tuuid {}: {:?}", tuuid, e);
+                warn!("get_complete_files Deserialization error on tuuid {}: {:?}\nContent:{:?}", tuuid, e, row);
                 continue    // Skip this entry
             }
         };
