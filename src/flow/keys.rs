@@ -137,7 +137,7 @@ pub async fn fetch_decryption_information<M>(
                         cle_secrete_base64: Default::default(), // Placeholder
                         cle_id: match row.cle_id {
                             Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping key_id to 128 chars"))?),
-                            None => return Err(CommonError::Str("Missing key_id decryption information"))
+                            None => Some(row.fuuid.as_str().try_into().map_err(|()| CommonError::Str("Error mapping key_id to 128 chars"))?),  // Old key type
                         },
                         format: row.format,
                         nonce: match row.nonce { Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?), None => None },
@@ -189,7 +189,10 @@ pub async fn fetch_decryption_information<M>(
                                     format,
                                     nonce: match video_item.nonce.as_ref() {
                                         Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?),
-                                        None => None
+                                        None => match video_item.header.as_ref() {
+                                            Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?),
+                                            None => return Err(CommonError::Str("Missing nonce/header decryption information for video"))
+                                        }
                                     },
                                     verification: None,
                                 },
@@ -233,6 +236,13 @@ pub async fn fetch_decryption_information<M>(
             match decrypted_key_map.get(cle_id) {
                 Some(key) => {
                     value.decryption.cle_secrete_base64 = key.key.cle_secrete_base64.clone();
+                    // Legacy format, copy over key information
+                    if value.decryption.nonce.is_none() {
+                        value.decryption.nonce = key.key.nonce.clone();
+                    }
+                    if value.decryption.format.is_none() {
+                        value.decryption.format = key.key.format.clone();
+                    }
                 },
                 None => return Err(CommonError::Str("Missing decryption information from keymaster response"))
             }
