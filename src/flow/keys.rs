@@ -173,7 +173,7 @@ pub async fn fetch_decryption_information<M>(
                     if fuuids.contains(&video_item.fuuid_video) {
                         let format: Option<FormatChiffrage> = match video_item.format.as_ref() {
                             Some(inner) => Some(inner.as_str().try_into().map_err(|_| CommonError::Str("Error mapping encryption format"))?),
-                            None => None
+                            None => Some(FormatChiffrage::MGS4)  // Legacy support
                         };
 
                         response_map.insert(
@@ -184,7 +184,7 @@ pub async fn fetch_decryption_information<M>(
                                     cle_secrete_base64: Default::default(), // Placeholder
                                     cle_id: match video_item.cle_id.as_ref() {
                                         Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping key_id to 128 chars"))?),
-                                        None => return Err(CommonError::Str("Missing key_id decryption information"))
+                                        None => Some(row.fuuid.as_str().try_into().map_err(|()| CommonError::Str("Error mapping key_id to 128 chars"))?),  // Old key type
                                     },
                                     format,
                                     nonce: match video_item.nonce.as_ref() {
