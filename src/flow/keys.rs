@@ -190,7 +190,11 @@ pub async fn fetch_decryption_information<M>(
                                     nonce: match video_item.nonce.as_ref() {
                                         Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?),
                                         None => match video_item.header.as_ref() {
-                                            Some(inner) => Some(inner.as_str().try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?),
+                                            Some(inner) => {
+                                                // Legacy support - the header has the "m" multibase base64 marker, remove it
+                                                let nonce = &inner[1..];
+                                                Some(nonce.try_into().map_err(|()| CommonError::Str("Error mapping nonce to 64 chars"))?)
+                                            },
                                             None => return Err(CommonError::Str("Missing nonce/header decryption information for video"))
                                         }
                                     },
