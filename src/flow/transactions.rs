@@ -1774,10 +1774,12 @@ async fn copy_files_collections(
 
     if ! vec_batches.is_empty() {
         aggregator.batch_insertions = Some(vec_batches);
+        aggregator.flush = true;  // Potential lots of records used by later transactions
     }
 
     if ! models.is_empty() {
         aggregator.ordered = Some(models);
+        aggregator.flush = true;  // Potential lots of records used by later transactions
     }
 
     Ok(aggregator)
