@@ -1180,7 +1180,7 @@ pub async fn move_files_collections(
                 // Move files under directory
                 let mut new_path = vec![&directory];
                 new_path.extend(&move_command.path);
-                let filtre = doc! { "path_cuuids.0": &directory, FIELD_NODE_TYPE: TypeNode::Fichier.to_str() };
+                let filtre = doc! { FIELD_PATH_CUUIDS_0: &directory, FIELD_NODE_TYPE: TypeNode::Fichier.to_str() };
                 let ops = doc! {
                     "$set": { FIELD_PATH_CUUIDS: new_path, CHAMP_FLAG_INDEX: false },
                     "$currentDate": { FIELD_DATE_MODIFIED: true }

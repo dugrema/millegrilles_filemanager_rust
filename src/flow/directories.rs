@@ -442,7 +442,7 @@ pub async fn parse_selection_directories<M>(
     // It will be used to update the path of subdirectories and their files.
     let destination_path = {
         let collection = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
-        let filtre = doc!{"tuuid": destination_cuuid};
+        let filtre = doc!{ FIELD_TUUID: destination_cuuid };
         let destination_directory = match collection
             .find_one(filtre)
             .session(&mut *session)
@@ -494,9 +494,9 @@ pub async fn parse_selection_directories<M>(
         let cuuid = match row.path_cuuids.as_ref() {
             Some(path_cuuids) => match path_cuuids.get(0) {
                 Some(cuuid) => cuuid.as_str(),
-                None => "root",
+                None => return Err(CommonError::String(format!("parse_selection_directories Tuuid {} at root (1), cannot move", row.tuuid))) // "root",
             },
-            None => "root"
+            None => return Err(CommonError::String(format!("parse_selection_directories Tuuid {} at root (2), cannot move", row.tuuid))) // "root"
         };
         match tuuids_by_cuuid.get_mut(cuuid) {
             Some(tuuids) => tuuids.push(row.tuuid.to_owned()),
@@ -509,8 +509,8 @@ pub async fn parse_selection_directories<M>(
     // Make a list of all subdirectories to move. Include all subdirectories (deleted or not).
     let cuuids: Vec<&String> = directories.iter().map(|d| &d.tuuid).collect();
     let mut filtre = doc!{
-        "path_cuuids": {"$in": &cuuids},
-        "type_node": TypeNode::Repertoire.to_str()
+        FIELD_PATH_CUUIDS: { "$in": &cuuids },
+        FIELD_NODE_TYPE: TypeNode::Repertoire.to_str()
     };
     if keep_deleted {
         // No filter to add - just keep all files whether they are deleted or not
@@ -550,9 +550,9 @@ pub async fn parse_selection_directories<M>(
         let cuuid = match row.path_cuuids.as_ref() {
             Some(path_cuuids) => match path_cuuids.get(0) {
                 Some(cuuid) => cuuid.as_str(),
-                None => "root",
+                None => return Err(CommonError::String(format!("parse_selection_directories Tuuid {} at root (3), cannot move", row.tuuid))) // "root"
             },
-            None => "root"
+            None => return Err(CommonError::String(format!("parse_selection_directories Tuuid {} at root (4), cannot move", row.tuuid))) // "root"
         };
         match tuuids_by_cuuid.get_mut(cuuid) {
             Some(tuuids) => tuuids.push(row.tuuid.to_owned()),

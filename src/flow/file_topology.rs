@@ -773,12 +773,12 @@ async fn maintain_delete_fichiersrep<M>(
     // Find any that are both supprime==true and have no remaining children nodes.
     let pipeline = vec![
         // Find deleted directories/collections
-        doc!{"$match": {"supprime": true, "type_node": {"$in": ["Repertoire", "Collection"]}}},
+        doc!{"$match": { FIELD_DELETED: true, FIELD_NODE_TYPE: {"$in": ["Repertoire", "Collection"]}} },
         // Check if they have at least 1 child node
         doc!{"$lookup": {
             "from": NOM_COLLECTION_FICHIERS_REP,
-            "localField": "tuuid",
-            "foreignField": "path_cuuids.0",
+            "localField": FIELD_TUUID,
+            "foreignField": FIELD_PATH_CUUIDS_0,
             "pipeline": [
                 {"$limit": 1},  // We don't need the exact count, a single entry is enough
                 {"$group": {"_id": "NONE", "count": {"$count": {}}}},
@@ -787,7 +787,7 @@ async fn maintain_delete_fichiersrep<M>(
         }},
         doc!{"$match": {"children": []}},       // Only keep entries with no children
         doc!{"$limit": 1000},
-        doc!{"$project": {"tuuid": 1}},
+        doc!{"$project": { FIELD_TUUID: 1 }},
         // doc!{"$out": "GrosFichiers/testDelete"},
     ];
     let mut cursor = collection.aggregate(pipeline).await?;
@@ -815,7 +815,7 @@ where M: MongoDaoTyped
 {
     let mut tuuids = Vec::with_capacity(fuuids.len());
 
-    let filtre_reps = doc! {"fuuids_versions": {"$in": fuuids}, "supprime": true};
+    let filtre_reps = doc! { "fuuids_versions": {"$in": fuuids}, FIELD_DELETED: true };
     let collection_fichiersreps = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
     let mut cursor_reps = collection_fichiersreps.find(filtre_reps).await?;
     while cursor_reps.advance().await? {

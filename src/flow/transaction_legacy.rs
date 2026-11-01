@@ -82,7 +82,8 @@ pub async fn legacy_deplacer_fichiers_collection<M>(
     debug!("commande_deplacer_fichiers_collection Transaction\n{}", serde_json::to_string(&transaction_value)?);
 
     // Reuse the new transaction code to produce the operations
-    let aggregator = move_files_collections(mongo, wrapper).await?;
+    let mut aggregator = move_files_collections(mongo, wrapper).await?;
+    aggregator.flush = true;
     Ok(aggregator)
 }
 
@@ -165,6 +166,20 @@ async fn dupliquer_structure_repertoires<M>(
     let mut tuuids_remaining: Vec<CopieTuuidVersCuuid> = tuuids.iter().map(|t| {
         CopieTuuidVersCuuid { tuuid_original: t.to_string(), cuuid_destination: cuuid.to_owned() }
     }).collect();
+    let mut map_new_path_by_old_cuuid: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Recuperer le path du cuuid destination, remplacer path_cuuids
+    let path_cuuids_destination = match get_path_cuuid(mongo, cuuid).await {
+        Ok(inner) => match inner {
+            Some(mut inner) => {
+                inner.insert(0, cuuid.to_string());
+                inner
+            },
+            None => vec![cuuid.to_string()],  // Root
+        },
+        Err(e) => Err(format!("transactions.dupliquer_structure_repertoires get_path_cuuid : {:?}", e))?
+    };
+    map_new_path_by_old_cuuid.insert(cuuid.to_string(), path_cuuids_destination);
 
     // let collection = middleware.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
     let collection_reps =
@@ -199,6 +214,7 @@ async fn dupliquer_structure_repertoires<M>(
             debug!("dupliquer_structure_repertoires Nouveau tuuid : {:?}", nouveau_tuuid);
 
             // Remplacer le tuuid
+            let old_tuuid = fichier_rep.tuuid.clone();
             fichier_rep.tuuid = nouveau_tuuid.clone();
 
             // Set as not deleted
@@ -206,19 +222,24 @@ async fn dupliquer_structure_repertoires<M>(
             fichier_rep.supprime_indirect = false;
 
             // Recuperer le path du cuuid destination, remplacer path_cuuids
-            let path_cuuids_option = match get_path_cuuid(mongo, &fichier_rep_tuuid.cuuid_destination).await {
-                Ok(inner) => inner,
-                Err(e) => Err(format!("transactions.dupliquer_structure_repertoires get_path_cuuid : {:?}", e))?
+            // let path_cuuids_option = match get_path_cuuid(mongo, &fichier_rep_tuuid.cuuid_destination).await {
+            //     Ok(inner) => inner,
+            //     Err(e) => Err(format!("transactions.dupliquer_structure_repertoires get_path_cuuid : {:?}", e))?
+            // };
+            let new_path_cuuids = match map_new_path_by_old_cuuid.get(&fichier_rep_tuuid.cuuid_destination) {
+                Some(inner) => inner,
+                None => Err(format!("transactions.dupliquer_structure_repertoires Unknown parent cuuid : {}", fichier_rep_tuuid.cuuid_destination))?
             };
+            fichier_rep.path_cuuids = Some(new_path_cuuids.clone());
 
-            match path_cuuids_option.as_ref() {
-                Some(inner) => {
-                    fichier_rep.path_cuuids = Some(inner.iter().map(|s| s.to_string()).collect());
-                },
-                None => {
-                    fichier_rep.path_cuuids = None;
-                }
-            };
+            // match path_cuuids_option.as_ref() {
+            //     Some(inner) => {
+            //         fichier_rep.path_cuuids = Some(inner.iter().map(|s| s.to_string()).collect());
+            //     },
+            //     None => {
+            //         fichier_rep.path_cuuids = None;
+            //     }
+            // };
 
             // collection.insert_one_with_session(doc_repertoire, None).await?;
             let filtre = doc! {
@@ -277,6 +298,15 @@ async fn dupliquer_structure_repertoires<M>(
                     }
                 },
                 TypeNode::Collection | TypeNode::Repertoire => {
+                    // Inserer repertoire dans map de cuuids
+                    match fichier_rep.path_cuuids.clone() {
+                        Some(path_cuuids) => {
+                            map_new_path_by_old_cuuid.insert(old_tuuid.clone(), path_cuuids.clone());
+                            map_new_path_by_old_cuuid.insert(nouveau_tuuid.clone(), path_cuuids);
+                        },
+                        None => return Err(CommonError::String(format!("Missing path_cuuids from directory/collection mapping for tuuid: {:?}", old_tuuid))),
+                    }
+
                     // Trouver les sous-repertoires, traiter individuellement
                     let filtre_ajout_cuuid = doc! {
                         format!("{}.0", CHAMP_PATH_CUUIDS): &tuuid_src,
@@ -1102,7 +1132,7 @@ pub async fn legacy_copy_v2<M>(
                     ]);
                 } else {
                     // Exclude all deleted files
-                    filtre.insert("supprime", false);
+                    filtre.insert(FIELD_DELETED, false);
                 }
                 let cursor_reps = collection_reps.find(filtre.clone()).await?;
                 copy_files_to_directory(middleware, user_id.as_str(), &created, cursor_reps, &destination, &transaction_id_bytes).await?;
