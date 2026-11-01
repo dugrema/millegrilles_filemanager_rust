@@ -166,7 +166,9 @@ async fn dupliquer_structure_repertoires<M>(
     let mut tuuids_remaining: Vec<CopieTuuidVersCuuid> = tuuids.iter().map(|t| {
         CopieTuuidVersCuuid { tuuid_original: t.to_string(), cuuid_destination: cuuid.to_owned() }
     }).collect();
-    let mut map_new_path_by_old_cuuid: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Create a map of destination paths, the cuuid (key) is both the old and new value (so identical paths for 2 different cuuids).
+    let mut map_new_path_by_cuuid: HashMap<String, Vec<String>> = HashMap::new();
 
     // Recuperer le path du cuuid destination, remplacer path_cuuids
     let path_cuuids_destination = match get_path_cuuid(mongo, cuuid).await {
@@ -179,9 +181,9 @@ async fn dupliquer_structure_repertoires<M>(
         },
         Err(e) => Err(format!("transactions.dupliquer_structure_repertoires get_path_cuuid : {:?}", e))?
     };
-    map_new_path_by_old_cuuid.insert(cuuid.to_string(), path_cuuids_destination);
+    // Insert the destination cuuid's path (not new, but still required)
+    map_new_path_by_cuuid.insert(cuuid.to_string(), path_cuuids_destination);
 
-    // let collection = middleware.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
     let collection_reps =
         mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
     let collection_versions =
@@ -203,43 +205,29 @@ async fn dupliquer_structure_repertoires<M>(
         if curseur.advance().await? {
             let mut fichier_rep = curseur.deserialize_current()?;
             let type_node = TypeNode::try_from(fichier_rep.type_node.as_str())?;
-            let tuuid_src = fichier_rep.tuuid.to_owned();
+            let old_tuuid = fichier_rep.tuuid.to_owned();
 
             debug!("dupliquer_structure_repertoires Copier fichier_rep {} vers {}", fichier_rep_tuuid.tuuid_original, fichier_rep_tuuid.cuuid_destination);
 
             // Creer nouveau tuuid unique pour le fichier/repertoire a dupliquer
             let nouveau_tuuid_str = format!("{}/{}/{}", uuid_transaction, &fichier_rep_tuuid.cuuid_destination, fichier_rep.tuuid);
             let nouveau_tuuid_multihash = hacher_bytes(nouveau_tuuid_str.into_bytes().as_slice(), Some(Code::Blake2s256), Some(Base::Base16Lower));
-            let nouveau_tuuid = (&nouveau_tuuid_multihash[9..]).to_string();
-            debug!("dupliquer_structure_repertoires Nouveau tuuid : {:?}", nouveau_tuuid);
+            let new_tuuid = (&nouveau_tuuid_multihash[9..]).to_string();
+            debug!("dupliquer_structure_repertoires Old tuuid {} to new tuuid : {:?}", old_tuuid, new_tuuid);
 
             // Remplacer le tuuid
-            let old_tuuid = fichier_rep.tuuid.clone();
-            fichier_rep.tuuid = nouveau_tuuid.clone();
+            fichier_rep.tuuid = new_tuuid.clone();
 
             // Set as not deleted
             fichier_rep.supprime = false;
             fichier_rep.supprime_indirect = false;
 
             // Recuperer le path du cuuid destination, remplacer path_cuuids
-            // let path_cuuids_option = match get_path_cuuid(mongo, &fichier_rep_tuuid.cuuid_destination).await {
-            //     Ok(inner) => inner,
-            //     Err(e) => Err(format!("transactions.dupliquer_structure_repertoires get_path_cuuid : {:?}", e))?
-            // };
-            let new_path_cuuids = match map_new_path_by_old_cuuid.get(&fichier_rep_tuuid.cuuid_destination) {
+            let new_path_cuuids = match map_new_path_by_cuuid.get(&fichier_rep_tuuid.cuuid_destination) {
                 Some(inner) => inner,
                 None => Err(format!("transactions.dupliquer_structure_repertoires Unknown parent cuuid : {}", fichier_rep_tuuid.cuuid_destination))?
             };
             fichier_rep.path_cuuids = Some(new_path_cuuids.clone());
-
-            // match path_cuuids_option.as_ref() {
-            //     Some(inner) => {
-            //         fichier_rep.path_cuuids = Some(inner.iter().map(|s| s.to_string()).collect());
-            //     },
-            //     None => {
-            //         fichier_rep.path_cuuids = None;
-            //     }
-            // };
 
             // collection.insert_one_with_session(doc_repertoire, None).await?;
             let filtre = doc! {
@@ -279,8 +267,8 @@ async fn dupliquer_structure_repertoires<M>(
                 TypeNode::Fichier => {
                     if user_id_destination != user_id {
                         // Copier les versions des fichiers vers le user_id destination
-                        let filtre = doc!{CHAMP_TUUIDS: &tuuid_src};
-                        let ops = doc!{"$addToSet": {"tuuids": &nouveau_tuuid}, "$currentDate": {FIELD_DATE_MODIFIED: true}};
+                        let filtre = doc!{CHAMP_TUUIDS: &old_tuuid};
+                        let ops = doc!{"$addToSet": {"tuuids": &new_tuuid}, "$currentDate": {FIELD_DATE_MODIFIED: true}};
                         models.push(
                             WriteModel::UpdateMany(
                                 UpdateManyModel::builder()
@@ -300,16 +288,19 @@ async fn dupliquer_structure_repertoires<M>(
                 TypeNode::Collection | TypeNode::Repertoire => {
                     // Inserer repertoire dans map de cuuids
                     match fichier_rep.path_cuuids.clone() {
-                        Some(path_cuuids) => {
-                            map_new_path_by_old_cuuid.insert(old_tuuid.clone(), path_cuuids.clone());
-                            map_new_path_by_old_cuuid.insert(nouveau_tuuid.clone(), path_cuuids);
+                        Some(mut path_cuuids) => {
+                            // Prepend new cuuid to path
+                            path_cuuids.insert(0, new_tuuid.clone());
+                            // Save with old and new tuuids (cuuids) as key
+                            map_new_path_by_cuuid.insert(old_tuuid.clone(), path_cuuids.clone());
+                            map_new_path_by_cuuid.insert(new_tuuid.clone(), path_cuuids);
                         },
                         None => return Err(CommonError::String(format!("Missing path_cuuids from directory/collection mapping for tuuid: {:?}", old_tuuid))),
                     }
 
                     // Trouver les sous-repertoires, traiter individuellement
                     let filtre_ajout_cuuid = doc! {
-                        format!("{}.0", CHAMP_PATH_CUUIDS): &tuuid_src,
+                        FIELD_PATH_CUUIDS_0: &old_tuuid,
                         "$or": [
                             {CHAMP_SUPPRIME: false},
                             {CHAMP_SUPPRIME_INDIRECT: true},  // Implies indirectly deleted. Used to copy out of Trash.
@@ -321,7 +312,7 @@ async fn dupliquer_structure_repertoires<M>(
                         let sous_document = curseur.deserialize_current()?;
                         let copie_tuuid = CopieTuuidVersCuuid {
                             tuuid_original: sous_document.tuuid.to_owned(),
-                            cuuid_destination: nouveau_tuuid.clone()
+                            cuuid_destination: new_tuuid.clone()
                         };
                         debug!("dupliquer_structure_repertoires Parcourir sous-fichier/rep {:?}", copie_tuuid);
                         tuuids_remaining.push(copie_tuuid);
@@ -1030,7 +1021,7 @@ fn digest_new_tuuid(transaction_id_bytes: &Vec<u8>, old_tuuid: &str) -> String {
 }
 
 pub async fn legacy_copy_v2<M>(
-    middleware: &M,
+    mongo: &M,
     wrapper: TransactionWrapper,
 ) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped
 {
@@ -1047,7 +1038,7 @@ pub async fn legacy_copy_v2<M>(
     let include_deleted = transaction_value.include_deleted.unwrap_or(false);
 
     let collection_reps =
-        middleware.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
+        mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
 
     let transaction_id = wrapper.message.id.clone();
     let transaction_id_bytes = hex::decode(&transaction_id)?;
@@ -1056,9 +1047,9 @@ pub async fn legacy_copy_v2<M>(
 
     if let Some(files) = transaction_value.files {
         let destination = &transaction_value.destination;
-        let filtre = doc!{"tuuid": {"$in": &files}};
+        let filtre = doc!{ FIELD_TUUID: {"$in": &files} };
         let cursor_reps = collection_reps.find(filtre.clone()).await?;
-        match copy_files_to_directory(middleware, user_id.as_str(), &created, cursor_reps, destination, &transaction_id_bytes).await {
+        match copy_files_to_directory(mongo, user_id.as_str(), &created, cursor_reps, destination, &transaction_id_bytes).await {
             Ok(inner) => models.extend(inner),
             Err(err) => return Err(err)
         }
@@ -1086,7 +1077,7 @@ pub async fn legacy_copy_v2<M>(
                     })
                     .collect();
                 // Copy the directory entry
-                let filtre = doc!{"tuuid": &directory};
+                let filtre = doc!{ FIELD_TUUID: &directory };
                 let mut cursor_reps = collection_reps.find(filtre.clone()).await?;
                 let new_tuuid = new_cuuid_map.get(&directory).expect("get new tuuid");
                 if cursor_reps.advance().await? {
@@ -1135,7 +1126,8 @@ pub async fn legacy_copy_v2<M>(
                     filtre.insert(FIELD_DELETED, false);
                 }
                 let cursor_reps = collection_reps.find(filtre.clone()).await?;
-                copy_files_to_directory(middleware, user_id.as_str(), &created, cursor_reps, &destination, &transaction_id_bytes).await?;
+                let models_copy = copy_files_to_directory(mongo, user_id.as_str(), &created, cursor_reps, &destination, &transaction_id_bytes).await?;
+                models.extend(models_copy);
             }
         }
     }
