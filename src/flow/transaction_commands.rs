@@ -838,6 +838,7 @@ async fn delete_file_reps<M>(
 
     debug!("commande_supprimer_documents Post transaction cleanup for : {:?}", tuuids_by_cuuid);
 
+    // Use a spawned thread to send the events (can take a long time)
     let outbound_copy = outbound.clone();
     tokio::spawn(async move {
         // Emettre evenements supprime par cuuid
