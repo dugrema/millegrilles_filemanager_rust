@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use millegrilles_common_rust::mongodb::ClientSession;
 
-const MAX_OPERATION_ITEM_COUNT: usize = 4000;
+const MAX_OPERATION_ITEM_COUNT: usize = 10_000;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -1357,6 +1357,7 @@ async fn copy_files_collections<M>(
         match run_copy_transactions(
             mongo,
             transaction,
+            delayed_event_emitter_service,
             &wrapper,
             &user_id,
             include_deleted,
@@ -1391,6 +1392,7 @@ async fn copy_files_collections<M>(
 async fn run_copy_transactions<M>(
     mongo: &M,
     transaction: &FileManagerTransactionService,
+    delayed_event_emitter_service: &DelayedEventEmitterService,
     wrapper: &MessageValidated,
     user_id: &String,
     include_deleted: bool,
@@ -1506,6 +1508,15 @@ async fn run_copy_transactions<M>(
             batch_counter += 1;
             transaction_value.entries.clear();
             transaction_value.batch_no = Some(batch_counter);
+
+            // Commit batch
+            session.commit_transaction().await?;
+
+            // Emit events on destination directory
+            // TODO
+
+            // Restart a DB transaction
+            session.start_transaction().await?;
         }
 
         let cuuid = match file.file_rep.path_cuuids.as_ref() {
