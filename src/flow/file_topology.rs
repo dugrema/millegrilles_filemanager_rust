@@ -749,12 +749,19 @@ async fn maintain_delete_fichiersrep<M>(
     // Used for batching transactions
     let mut tuuids = Vec::with_capacity(BATCH_SIZE);
 
-    debug!("Cleanup deleted files that are not associated to any file version (fuuids)");
+    // Files expire after 1 month of being deleted
+    let expired_files = Utc::now() - Duration::days(31);
+    let expired_files = bson::DateTime::from_chrono(expired_files);
+
+    debug!("Cleanup deleted files that are not associated to any file version (fuuids) or deleted more than a month ago");
     {
         let filtre = doc!{
             FIELD_NODE_TYPE: "Fichier",
             FIELD_DELETED: true,
-            "fuuids_versions.0": {"$exists": false}
+            "$or": [
+                { "fuuids_versions.0": { "$exists": false } },
+                { FIELD_DATE_MODIFIED: { "$lt": expired_files } }
+            ]
         };
         let mut cursor = collection
             .find(filtre)
