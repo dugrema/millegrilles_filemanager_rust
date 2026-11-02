@@ -28,9 +28,10 @@ use millegrilles_common_rust::v3::MessagingService;
 use millegrilles_common_rust::v3::facades::message_inbound::MessageValidated;
 use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFacade;
 use millegrilles_common_rust::v3::models::ErrorMessage;
-use millegrilles_common_rust::{bson, serde_json};
+use millegrilles_common_rust::{bson, serde_json, tokio};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use millegrilles_common_rust::mongodb::ClientSession;
 
 const MAX_OPERATION_ITEM_COUNT: usize = 1000;
@@ -40,8 +41,8 @@ const MAX_OPERATION_ITEM_COUNT: usize = 1000;
 pub async fn process_transaction<M>(
     mongo: &M,
     messaging: &dyn MessagingService,
-    outbound: &MessageOutboundFacade,
-    delayed_event_emitter_service: &DelayedEventEmitterService,
+    outbound: Arc<MessageOutboundFacade>,
+    delayed_event_emitter_service: Arc<DelayedEventEmitterService>,
     transaction: &FileManagerTransactionService,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
@@ -54,42 +55,42 @@ pub async fn process_transaction<M>(
         MessageKind::Commande => {
             match action {
                 // Adding, updating files
-                TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_DECRIRE_FICHIER => update_file_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_DELETE_FILE_COMMENT => delete_file_comment(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_FILE_SUMMARY => file_summary(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_NOUVELLE_COLLECTION => new_collection(mongo, messaging, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_NOUVELLE_VERSION => new_file_version(mongo, messaging, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_DECRIRE_FICHIER => update_file_metadata(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_DECRIRE_COLLECTION => update_collection_metadata(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_UPDATE_FILE_TEXT_CONTENT => update_file_text_content(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_DELETE_FILE_COMMENT => delete_file_comment(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_FILE_SUMMARY => file_summary(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
 
                 // Moving files
-                TRANSACTION_AJOUTER_FICHIERS_COLLECTION => copy_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_DEPLACER_FICHIERS_COLLECTION => move_files_collections(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_AJOUTER_FICHIERS_COLLECTION => copy_files_collections(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_DEPLACER_FICHIERS_COLLECTION => move_files_collections(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
                 TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_RECYCLE_ITEMS_V3 | TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_RECYCLE_ITEMS_V3 | TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
 
                 // Media
-                TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_SUPPRIMER_VIDEO => delete_video(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => delete_image_job(mongo, outbound, transaction, wrapper).await,
-                TRANSACTION_VIDEO_DELETE_JOB_V2 => delete_video_job(mongo, outbound, transaction, wrapper).await,
-                TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
-                TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_ASSOCIER_VIDEO => associate_video_conversion(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_ASSOCIER_CONVERSIONS => associate_file_conversions(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_VIDEO => delete_video(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_IMAGE_SUPPRIMER_JOB_V2 => delete_image_job(mongo, outbound.as_ref(), transaction, wrapper).await,
+                TRANSACTION_VIDEO_DELETE_JOB_V2 => delete_video_job(mongo, outbound.as_ref(), transaction, wrapper).await,
+                TRANSACTION_ADD_WEB_SUBTITLE => add_web_subtitle(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
+                TRANSACTION_REMOVE_WEB_SUBTITLE => remove_web_subtitle(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
 
                 // Sharing
-                TRANSACTION_AJOUTER_CONTACT_LOCAL => share_add_contact(mongo, outbound, transaction, wrapper).await,
-                TRANSACTION_SUPPRIMER_CONTACTS => share_remove_contact(mongo, outbound, transaction, wrapper).await,
-                TRANSACTION_PARTAGER_COLLECTIONS => share_add_collection(mongo, outbound, transaction, wrapper).await,
-                TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(mongo, outbound, transaction, wrapper).await,
+                TRANSACTION_AJOUTER_CONTACT_LOCAL => share_add_contact(mongo, outbound.as_ref(), transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_CONTACTS => share_remove_contact(mongo, outbound.as_ref(), transaction, wrapper).await,
+                TRANSACTION_PARTAGER_COLLECTIONS => share_add_collection(mongo, outbound.as_ref(), transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_PARTAGE_USAGER => share_remove_collection(mongo, outbound.as_ref(), transaction, wrapper).await,
 
                 // Obsolete?
-                TRANSACTION_RECUPERER_DOCUMENTS_V2 => obsolete(outbound, wrapper).await,
+                TRANSACTION_RECUPERER_DOCUMENTS_V2 => obsolete(outbound.as_ref(), wrapper).await,
 
-                _ => unknown(outbound, wrapper).await
+                _ => unknown(outbound.as_ref(), wrapper).await
             }
         },
-        _ => unknown(outbound, wrapper).await
+        _ => unknown(outbound.as_ref(), wrapper).await
     }
 }
 
@@ -720,8 +721,8 @@ struct CommandeSupprimerTuuidsIndex {
 
 async fn delete_file_reps<M>(
     mongo: &M,
-    outbound: &MessageOutboundFacade,
-    delayed_event_emitter_service: &DelayedEventEmitterService,
+    outbound: Arc<MessageOutboundFacade>,
+    delayed_event_emitter_service: Arc<DelayedEventEmitterService>,
     transaction: &FileManagerTransactionService,
     wrapper: MessageValidated
 ) -> Result<(), CommonError> where M: MongoDaoTyped
@@ -837,28 +838,32 @@ async fn delete_file_reps<M>(
 
     debug!("commande_supprimer_documents Post transaction cleanup for : {:?}", tuuids_by_cuuid);
 
-    // Emettre evenements supprime par cuuid
-    for (cuuid, liste) in tuuids_by_cuuid.into_iter() {
-        let evenement = CollectionEventAggregator::new(cuuid.as_str())
-            .retires(liste.clone());
-        delayed_event_emitter_service.emit(evenement).await?;
+    let outbound_copy = outbound.clone();
+    tokio::spawn(async move {
+        // Emettre evenements supprime par cuuid
+        for (cuuid, liste) in tuuids_by_cuuid.into_iter() {
+            let evenement = CollectionEventAggregator::new(cuuid.as_str())
+                .retires(liste.clone());
+            delayed_event_emitter_service.emit(evenement).await.ok();
 
-        // Cleanup of the search index. The list may be large and take a while to process.
-        // Just let it go after a short wait, not a big deal if it fails. It can be cleaned-up by reindexing the DB.
-        let routing = RoutageMessageAction::builder("solrrelai", "supprimerTuuids", vec![Securite::L3Protege])
-            .timeout_blocking(300)
-            .build();
-        let commande_index = CommandeSupprimerTuuidsIndex { tuuids: liste };
-        match outbound.send_command(routing, &commande_index).await? {
-            Some(response) => match response.is_err()? {
-                (true, e) => {
-                    warn!("Error on command to delete indexing for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
+            // Cleanup of the search index. The list may be large and take a while to process.
+            // Just let it go after a short wait, not a big deal if it fails. It can be cleaned-up by reindexing the DB.
+            let routing = RoutageMessageAction::builder("solrrelai", "supprimerTuuids", vec![Securite::L3Protege])
+                .timeout_blocking(750)
+                .build();
+            let commande_index = CommandeSupprimerTuuidsIndex { tuuids: liste };
+            match outbound_copy.send_command(routing, &commande_index).await {
+                Ok(Some(response)) => match response.is_err() {
+                    Ok((true, e)) => {
+                        warn!("Error on command to delete indexing for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
+                    },
+                    _ => ()
                 },
-                _ => ()
-            },
-            None => warn!("No response on command to delete indexing for deleted tuuid:{:?}", commande_index.tuuids)
+                Ok(None) => warn!("No response on command to delete indexing for deleted tuuid:{:?}", commande_index.tuuids),
+                Err(e) => warn!("Error on command to delete indexing for deleted tuuid:{:?}", e)
+            }
         }
-    }
+    });
 
     outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
 }

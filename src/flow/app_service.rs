@@ -226,8 +226,8 @@ impl ApplicationService {
                     if let Err(e) = process_transaction(
                         self.mongo.as_ref(),
                         self.messaging.as_ref(),
-                        self.outbound.as_ref(),
-                        self.event_emitter_service.as_ref(),
+                        self.outbound.clone(),
+                        self.event_emitter_service.clone(),
                         self.transaction.as_ref(),
                         message
                     ).await {
