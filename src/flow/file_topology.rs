@@ -466,7 +466,7 @@ pub async fn reclamer_fichiers<M>(
             Ok(())
         },
         Err(e) => {
-            session.abort_transaction().await?;
+            session.abort_transaction().await.ok();
             Err(e)
         }
     }
@@ -522,13 +522,17 @@ async fn verifier_visites_nouvelles<M>(
     debug!("verifier_visites_nouvelles Verifier {} fuuids", visits.len());
 
     if visits.len() == 0 {
-        return Ok(())  // Nothing to do
+        return Ok(())  // Nothing to do (caller will commit transaction)
     }
 
-    // The following code does not use transactions, just commit the work
+    // Split the session, commit the current the work before remote call (may hang/fail)
     session.commit_transaction().await?;
 
     let reponse = verifier_visites_topologies(outbound, &visits).await?;
+
+    // Need to restart a transaction to finish
+    session.start_transaction().await?;
+
     if let Some(visites) = reponse.visits {
         debug!("verifier_visites_nouvelles Visite {} nouveaux fuuids", visites.len());
         for item in visites {
@@ -545,8 +549,6 @@ async fn verifier_visites_nouvelles<M>(
         }
     }
 
-    // Need to restart a transaction to finish
-    session.start_transaction().await?;
     if let Some(unknown) = reponse.unknown {
         debug!("verifier_visites_nouvelles {} fuuids inconnus", unknown.len());
         sauvegarder_fuuid_inconnu(mongo, &unknown, session).await?;
