@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use millegrilles_common_rust::mongodb::ClientSession;
 
-const MAX_OPERATION_ITEM_COUNT: usize = 1000;
+const MAX_OPERATION_ITEM_COUNT: usize = 3000;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
