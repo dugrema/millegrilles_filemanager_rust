@@ -39,19 +39,29 @@ pub async fn legacy_deplacer_fichiers_collection<M>(
     let transaction_collection: TransactionDeplacerFichiersCollection = wrapper.message.deserialize()?;
 
     // This code is copied and adapted from transaction_commands.move_files_collections()
-    let mut session = mongo.get_session().await?;
-    session.start_transaction().await?;
+    let result = {
+        let mut session = mongo.get_session().await?;
+        session.start_transaction().await?;
 
-    let result = parse_selection_directories(
-        mongo,
-        user_id.as_str(),
-        &transaction_collection.cuuid_destination,
-        &transaction_collection.inclure_tuuids,
-        true,
-        true,
-        &mut session
-    ).await?;
-    session.commit_transaction().await?;
+        match parse_selection_directories(
+            mongo,
+            user_id.as_str(),
+            &transaction_collection.cuuid_destination,
+            &transaction_collection.inclure_tuuids,
+            true,
+            true,
+            &mut session
+        ).await {
+            Ok(inner) => {
+                session.commit_transaction().await?;
+                inner
+            },
+            Err(e) => {
+                session.abort_transaction().await?;
+                return Err(e)
+            }
+        }
+    };
 
     // Check that the destination is not under the source (moving under itself breaks the graph)
     if let Some(directory_moves) = result.directories.as_ref() {
