@@ -17,7 +17,7 @@ use millegrilles_common_rust::bson::doc;
 use millegrilles_common_rust::certificats::VerificateurPermissions;
 use millegrilles_common_rust::constantes::{DOMAINE_NOM_MAITREDESCOMPTES, ROLE_MEDIA, ROLE_OLLAMA_RELAI, RolesCertificats, Securite};
 use millegrilles_common_rust::dechiffrage::DataChiffre;
-use millegrilles_common_rust::error::Error as CommonError;
+use millegrilles_common_rust::error::{Error as CommonError, Error};
 use millegrilles_common_rust::generateur_messages::RoutageMessageAction;
 use millegrilles_common_rust::jwt_simple::prelude::Deserialize;
 use millegrilles_common_rust::millegrilles_cryptographie::messages_structs::MessageKind;
@@ -31,6 +31,9 @@ use millegrilles_common_rust::v3::models::ErrorMessage;
 use millegrilles_common_rust::{bson, serde_json};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use millegrilles_common_rust::mongodb::ClientSession;
+
+const MAX_OPERATION_ITEM_COUNT: usize = 1000;
 
 /// Process the command part of the transaction (checks, validations, volatile updates),
 /// calls transaction processor and then handles responses and emits events.
@@ -805,19 +808,83 @@ async fn delete_file_reps<M>(
     }
 
     // This command may span multiple transactions depending on the number of rows affected (sub-directories and all files)
-    let mut session = mongo.get_session().await?;
-    session.start_transaction().await?;
+    {
+        let mut session = mongo.get_session().await?;
+        session.start_transaction().await?;
 
+        match run_delete_operation_transaction(
+            mongo,
+            transaction,
+            &wrapper,
+            user_id,
+            files,
+            directories,
+            &mut tuuids_by_cuuid,
+            subdirectories,
+            &mut session
+        ).await {
+            Ok(()) => {
+                // Operations processed, commit session
+                session.commit_transaction().await?;
+            },
+            Err(e) => {
+                session.abort_transaction().await?;
+                outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await.ok();
+                return Err(e)
+            }
+        };
+    }
+
+    debug!("commande_supprimer_documents Post transaction cleanup for : {:?}", tuuids_by_cuuid);
+
+    // Emettre evenements supprime par cuuid
+    for (cuuid, liste) in tuuids_by_cuuid.into_iter() {
+        let evenement = CollectionEventAggregator::new(cuuid.as_str())
+            .retires(liste.clone());
+        delayed_event_emitter_service.emit(evenement).await?;
+
+        // Cleanup of the search index. The list may be large and take a while to process.
+        // Just let it go after a short wait, not a big deal if it fails. It can be cleaned-up by reindexing the DB.
+        let routing = RoutageMessageAction::builder("solrrelai", "supprimerTuuids", vec![Securite::L3Protege])
+            .timeout_blocking(300)
+            .build();
+        let commande_index = CommandeSupprimerTuuidsIndex { tuuids: liste };
+        match outbound.send_command(routing, &commande_index).await? {
+            Some(response) => match response.is_err()? {
+                (true, e) => {
+                    warn!("Error on command to delete indexing for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
+                },
+                _ => ()
+            },
+            None => warn!("No response on command to delete indexing for deleted tuuid:{:?}", commande_index.tuuids)
+        }
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn run_delete_operation_transaction<M>(
+    mongo: &M,
+    transaction: &FileManagerTransactionService,
+    wrapper: &MessageValidated,
+    user_id: String,
+    files: Vec<String>,
+    directories: Vec<String>,
+    tuuids_by_cuuid: &mut HashMap<String, Vec<String>>,
+    subdirectories: Vec<String>,
+    mut session: &mut ClientSession
+) -> Result<(), Error> where M: MongoDaoTyped {
     // Make a list of all files that will be affected.
     // Those will be sent in (potentially) batched transactions up-front. This removes the
     // files explicitly from the versions collection.
     // This is also for post-transaction cleanup (search index, events).
     let mut subfiles = Vec::with_capacity(5_000);
-    let filtre = doc!{
+    let filtre = doc! {
         FIELD_PATH_CUUIDS: { "$in": &directories },
         FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
         FIELD_DELETED: false
     };
+    let collection_fichierrep = mongo.get_collection_typed::<NodeFichierRepOwned>(NOM_COLLECTION_FICHIERS_REP)?;
     let mut cursor = collection_fichierrep.find(filtre).await?;
     while let Some(row) = cursor.next().await {
         let row = row?;
@@ -894,35 +961,7 @@ async fn delete_file_reps<M>(
         Some(&mut session)
     ).await?;
 
-    // Operations processed, commit session
-    session.commit_transaction().await?;
-
-    debug!("commande_supprimer_documents Post transaction cleanup for : {:?}", tuuids_by_cuuid);
-
-    // Emettre evenements supprime par cuuid
-    for (cuuid, liste) in tuuids_by_cuuid.into_iter() {
-        let evenement = CollectionEventAggregator::new(cuuid.as_str())
-            .retires(liste.clone());
-        delayed_event_emitter_service.emit(evenement).await?;
-
-        // Cleanup of the search index. The list may be large and take a while to process.
-        // Just let it go after a short wait, not a big deal if it fails. It can be cleaned-up by reindexing the DB.
-        let routing = RoutageMessageAction::builder("solrrelai", "supprimerTuuids", vec![Securite::L3Protege])
-            .timeout_blocking(300)
-            .build();
-        let commande_index = CommandeSupprimerTuuidsIndex { tuuids: liste };
-        match outbound.send_command(routing, &commande_index).await? {
-            Some(response) => match response.is_err()? {
-                (true, e) => {
-                    warn!("Error on command to delete indexing for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
-                },
-                _ => ()
-            },
-            None => warn!("No response on command to delete indexing for deleted tuuid:{:?}", commande_index.tuuids)
-        }
-    }
-
-    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+    Ok(())
 }
 
 async fn delete_video<M>(
@@ -1040,9 +1079,58 @@ async fn move_files_collections<M>(
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Not a user certificate")).await
     };
 
-    let mut session = mongo.get_session().await?;
-    session.start_transaction().await?;
+    {
+        let mut session = mongo.get_session().await?;
+        session.start_transaction().await?;
 
+        match run_move_operation_transactions(
+            mongo,
+            transaction,
+            &wrapper,
+            &command,
+            user_id,
+            &mut session
+        ).await {
+            Ok(()) => session.commit_transaction().await?,
+            Err(e) => {
+                session.abort_transaction().await?;
+                outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await.ok();
+                return Err(e)
+            }
+        };
+    }
+
+    // Job done, emit events (they are transaction agnostic)
+    for tuuid in &command.inclure_tuuids {
+        // Emettre fichier pour que tous les clients recoivent la mise a jour
+        if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, &tuuid).await {
+            warn!("transaction_deplacer_fichiers_collection Erreur emettre_evenement_maj_fichier : {:?}", e);
+        }
+    }
+
+    let destination_events = CollectionEventAggregator::new(command.cuuid_destination.as_str())
+        .fichiers_ajoutes(command.inclure_tuuids.clone());
+    let source_events = CollectionEventAggregator::new(command.cuuid_origine.as_str())
+        .retires(command.inclure_tuuids.clone());
+
+    if let Err(e) = delayed_event_emitter_service.emit(source_events).await {
+        warn!("move_files_collections Error delayed_event_emitter_service (source events) : {:?}", e);
+    }
+    if let Err(e) = delayed_event_emitter_service.emit(destination_events).await {
+        warn!("move_files_collections Error delayed_event_emitter_service (destination events) : {:?}", e);
+    }
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn run_move_operation_transactions<M>(
+    mongo: &M,
+    transaction: &FileManagerTransactionService,
+    wrapper: &MessageValidated,
+    command: &TransactionDeplacerFichiersCollection,
+    user_id: String,
+    mut session: &mut ClientSession
+) -> Result<(), CommonError> where M: MongoDaoTyped {
     let result = parse_selection_directories(
         mongo,
         user_id.as_str(),
@@ -1059,7 +1147,8 @@ async fn move_files_collections<M>(
             for directory in &directory_move.directories {
                 if result.destination_path.contains(directory) {
                     debug!("commande_deplacer_fichiers_collection Rejecting move directory, the destination is under the source (this breaks the graph)");
-                    return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "Cannot move directory under itself")).await
+                    // return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(409, "Cannot move directory under itself")).await
+                    return Err(CommonError::Str("commande_deplacer_fichiers_collection Rejecting move directory, the destination is under the source (this breaks the graph)"))
                 }
             }
         }
@@ -1086,31 +1175,8 @@ async fn move_files_collections<M>(
         Some(&mut session)
     ).await?;
 
-    // Job done, commit then emit events (they are transaction agnostic)
-    session.commit_transaction().await?;
-
-    for tuuid in &command.inclure_tuuids {
-        // Emettre fichier pour que tous les clients recoivent la mise a jour
-        if let Err(e) = emettre_evenement_maj_fichier(mongo, delayed_event_emitter_service, &tuuid).await {
-            warn!("transaction_deplacer_fichiers_collection Erreur emettre_evenement_maj_fichier : {:?}", e);
-        }
-    }
-
-    let destination_events = CollectionEventAggregator::new(command.cuuid_destination.as_str())
-        .fichiers_ajoutes(command.inclure_tuuids.clone());
-    let source_events = CollectionEventAggregator::new(command.cuuid_origine.as_str())
-        .retires(command.inclure_tuuids.clone());
-
-    if let Err(e) = delayed_event_emitter_service.emit(source_events).await {
-        warn!("move_files_collections Error delayed_event_emitter_service (source events) : {:?}", e);
-    }
-    if let Err(e) = delayed_event_emitter_service.emit(destination_events).await {
-        warn!("move_files_collections Error delayed_event_emitter_service (destination events) : {:?}", e);
-    }
-
-    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+    Ok(())
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionAjouterFichiersCollection {
@@ -1240,6 +1306,21 @@ async fn copy_files_collections<M>(
         }
     }
 
+    {
+        // Limit item count (system performance issues, DB transactions)
+        let mut filter_limit_check = filter_request.clone();
+        filter_limit_check.remove(FIELD_NODE_TYPE);
+        let subdir_total = collection_filereps.count_documents(filter_limit_check).await?;
+        let total_count = subdir_total + file_tuuids.len() as u64;
+        if total_count > MAX_OPERATION_ITEM_COUNT as u64 {
+            warn!("copy_files_collections Operation over {} files, limit is {}. Aborting", total_count, MAX_OPERATION_ITEM_COUNT);
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(
+                429,
+                format!("{} files/directories requested in copy, the system limit is {}", total_count, MAX_OPERATION_ITEM_COUNT).as_str()
+            )).await
+        }
+    }
+
     let mut cursor = collection_filereps.find(filter_request).await?;
     while let Some(row) = cursor.next().await {
         let file_rep = row?;
@@ -1256,9 +1337,58 @@ async fn copy_files_collections<M>(
     }
     debug!("All directories mapped: {:?}", map_new_by_old_cuuid.keys());
 
-    let mut session = mongo.get_session().await?;
-    session.start_transaction().await?;
+    {
+        let mut session = mongo.get_session().await?;
+        session.start_transaction().await?;
 
+        match run_copy_transactions(
+            mongo,
+            transaction,
+            &wrapper,
+            &user_id,
+            include_deleted,
+            allowed_cuuids,
+            tuuid_prefix,
+            &mut tuuid_counter,
+            &mut file_tuuids,
+            &mut map_new_by_old_cuuid,
+            destination_path_cuuid,
+            &mut session
+        ).await {
+            Ok(inner) => {
+                session.commit_transaction().await?;
+                inner
+            },
+            Err(e) => {
+                session.abort_transaction().await?;
+                outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(500, "Server error")).await.ok();
+                return Err(e)
+            }
+        };
+    }
+
+    // Emit events on destination directory
+    let evenement_contenu = CollectionEventAggregator::new(command.cuuid.as_str())
+        .fichiers_ajoutes(command.inclure_tuuids.clone());
+    delayed_event_emitter_service.emit(evenement_contenu).await?;
+
+    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+}
+
+async fn run_copy_transactions<M>(
+    mongo: &M,
+    transaction: &FileManagerTransactionService,
+    wrapper: &MessageValidated,
+    user_id: &String,
+    include_deleted: bool,
+    allowed_cuuids: Option<Vec<String>>,
+    tuuid_prefix: String,
+    tuuid_counter: &mut u32,
+    file_tuuids: &mut Vec<String>,
+    map_new_by_old_cuuid: &mut HashMap<String, String>,
+    destination_path_cuuid: Vec<String>,
+    mut session: &mut ClientSession
+) -> Result<TransactionCopyV3, CommonError> where M: MongoDaoTyped {
     let mut command_copy = wrapper.message.clone();
     command_copy.certificat = None;  // Remove certificate, keeping a copy for reference
 
@@ -1283,10 +1413,10 @@ async fn copy_files_collections<M>(
     match allowed_cuuids.as_ref() {
         Some(cuuids) => {
             // Filter on either authenticated user_id (local) or allowed parent folders (cuuids)
-            filter_directories.insert("$or",  bson::serialize_to_bson(&vec![
-                doc!{ FIELD_USER_ID: &user_id },
-                doc!{ FIELD_TUUID: { "$in": &cuuids } },
-                doc!{ FIELD_PATH_CUUIDS: { "$in": cuuids } },
+            filter_directories.insert("$or", bson::serialize_to_bson(&vec![
+                doc! { FIELD_USER_ID: &user_id },
+                doc! { FIELD_TUUID: { "$in": &cuuids } },
+                doc! { FIELD_PATH_CUUIDS: { "$in": cuuids } },
             ])?);
         },
         None => {
@@ -1337,13 +1467,13 @@ async fn copy_files_collections<M>(
     // Map all files
     let mut filter_files = doc! {
         "$or": [
-            { FIELD_TUUID: { "$in": &file_tuuids } },
+            { FIELD_TUUID: { "$in": file_tuuids } },
             { FIELD_PATH_CUUIDS: { "$in": &all_directories } },
         ],
         // FIELD_USER_ID: &user_id_source,
         FIELD_NODE_TYPE: TypeNode::Fichier.to_str(),
     };
-    if ! include_deleted {
+    if !include_deleted {
         filter_files.insert(FIELD_DELETED, false);
     }
 
@@ -1379,7 +1509,7 @@ async fn copy_files_collections<M>(
 
         // Generate a new tuuid for this file
         let new_tuuid = format!("{}{:08x}", tuuid_prefix, tuuid_counter);
-        tuuid_counter += 1;
+        *tuuid_counter += 1;
 
         // Update file
         file.file_rep.tuuid = new_tuuid;
@@ -1393,7 +1523,7 @@ async fn copy_files_collections<M>(
             for comment in comments {
                 // Generate new unique identifier for the comment
                 let new_comment_id = format!("{}{:08x}", tuuid_prefix, tuuid_counter);
-                tuuid_counter += 1;
+                *tuuid_counter += 1;
                 comment.comment_id = new_comment_id;
             }
         }
@@ -1401,7 +1531,7 @@ async fn copy_files_collections<M>(
         transaction_value.entries.push(file);
     }
 
-    if ! transaction_value.entries.is_empty() {
+    if !transaction_value.entries.is_empty() {
         if batch_counter == 1 {
             // No batching used
             transaction_value.batch_no = None;
@@ -1416,16 +1546,8 @@ async fn copy_files_collections<M>(
             Some(&mut session)
         ).await?;
     }
-    drop(transaction_value);
 
-    session.commit_transaction().await?;
-
-    // Emit events on destination directory
-    let evenement_contenu = CollectionEventAggregator::new(command.cuuid.as_str())
-        .fichiers_ajoutes(command.inclure_tuuids.clone());
-    delayed_event_emitter_service.emit(evenement_contenu).await?;
-
-    outbound.respond(wrapper.delivery_info, ErrorMessage::ok()).await
+    Ok(transaction_value)
 }
 
 async fn file_summary<M>(
