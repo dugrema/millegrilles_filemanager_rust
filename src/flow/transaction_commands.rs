@@ -863,12 +863,12 @@ async fn delete_file_reps<M>(
             match outbound_copy.send_command(routing, &commande_index).await {
                 Ok(Some(response)) => match response.is_err() {
                     Ok((true, e)) => {
-                        warn!("Error on command to delete indexing for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
+                        warn!("Error on command to remove files from search index (solr) for deleted tuuid:{:?}: {:?}", commande_index.tuuids, e);
                     },
                     _ => ()
                 },
-                Ok(None) => warn!("No response on command to delete indexing for deleted tuuid:{:?}", commande_index.tuuids),
-                Err(e) => warn!("Error on command to delete indexing for deleted tuuid:{:?}", e)
+                Ok(None) => warn!("No response on command to remove files from search indexing (solr) for deleted tuuid:{:?}", commande_index.tuuids),
+                Err(e) => warn!("Error on command to remove files from search indexing (solr) for deleted tuuid:{:?}", e)
             }
         }
     });
