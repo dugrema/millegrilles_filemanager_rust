@@ -841,7 +841,14 @@ async fn delete_file_reps<M>(
     // Use a spawned thread to send the events (can take a long time)
     let outbound_copy = outbound.clone();
     tokio::spawn(async move {
-        // Emettre evenements supprime par cuuid
+        // Emit all events
+        for (cuuid, liste) in tuuids_by_cuuid.iter() {
+            let evenement = CollectionEventAggregator::new(cuuid.as_str())
+                .retires(liste.clone());
+            delayed_event_emitter_service.emit(evenement).await.ok();
+        }
+
+        // Follow-up with deletion of files in index
         for (cuuid, liste) in tuuids_by_cuuid.into_iter() {
             let evenement = CollectionEventAggregator::new(cuuid.as_str())
                 .retires(liste.clone());
