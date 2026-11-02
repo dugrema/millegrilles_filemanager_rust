@@ -282,7 +282,7 @@ pub struct VisitWorkRow {
 pub async fn receive_visits(mongo: &dyn MongoDao, command: RequeteGetVisitesFuuidsResponse) -> Result<(), CommonError> {
     let collection = mongo.get_collection(NOM_COLLECTION_TEMP_VISITS)?;
     if let Some(visits) = command.visits {
-        debug!("Received {} visit entries", visits.len());
+        // debug!("Received {} visit entries", visits.len());
         let mut batch = Vec::with_capacity(visits.len());
         for visit in visits {
             for (filehost_id, timestamp) in visit.visits {
@@ -297,7 +297,9 @@ pub async fn receive_visits(mongo: &dyn MongoDao, command: RequeteGetVisitesFuui
     }
 
     if let Some(unknowns) = command.unknown {
-        debug!("Received {} unknwown fuuid claims responses", unknowns.len());
+        if unknowns.len() > 0 {
+            debug!("Received {} unknwown fuuid claims responses", unknowns.len());
+        }
         let mut batch = Vec::with_capacity(unknowns.len());
         for fuuid in unknowns {
             let row = VisitWorkRow { fuuid, filehost_id: None, visit_time: None };
@@ -747,7 +749,7 @@ async fn maintain_delete_fichiersrep<M>(
     // Used for batching transactions
     let mut tuuids = Vec::with_capacity(BATCH_SIZE);
 
-    // Cleanup deleted files that are not associated to any file version (fuuids).
+    debug!("Cleanup deleted files that are not associated to any file version (fuuids)");
     {
         let filtre = doc!{
             FIELD_NODE_TYPE: "Fichier",
@@ -773,6 +775,7 @@ async fn maintain_delete_fichiersrep<M>(
 
     // Directory/Collections
     // Find any that are both supprime==true and have no remaining children nodes.
+    debug!("Cleanup deleted directories with no files left");
     let pipeline = vec![
         // Find deleted directories/collections
         doc!{"$match": { FIELD_DELETED: true, FIELD_NODE_TYPE: {"$in": ["Repertoire", "Collection"]}} },
@@ -782,8 +785,8 @@ async fn maintain_delete_fichiersrep<M>(
             "localField": FIELD_TUUID,
             "foreignField": FIELD_PATH_CUUIDS_0,
             "pipeline": [
-                {"$limit": 1},  // We don't need the exact count, a single entry is enough
-                {"$group": {"_id": "NONE", "count": {"$count": {}}}},
+                { "$project": { "_id": 1 } },
+                { "$limit": 1 },  // We don't need the exact count, a single entry is enough
             ],
             "as": "children",
         }},
@@ -832,7 +835,7 @@ async fn run_delete_tuuids_transaction(
     transaction: &dyn TransactionService,
     tuuids: Vec<String>
 ) -> Result<(), CommonError> {
-    debug!("maintain_delete_fichiersrep Delete tuuids: {:?}", tuuids);
+    info!("maintain_delete_fichiersrep Delete tuuids: {:?}", tuuids);
     let transaction_value = PermanentlyDeleteFilesTransaction { tuuids, fuuids: None };
     debug!("maintain_delete_fichiersrep: Transaction {:?}", transaction_value);
 

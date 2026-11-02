@@ -139,6 +139,15 @@ pub async fn create_index_mongodb(db: &dyn MongoDao) -> Result<(), CommonError> 
         Some(IndexOptions { nom_index: Some("path_cuuids".to_string()), unique: false })
     ).await?;
 
+    // Index required for directory deletion (speeds up the maintenance)
+    db.create_index(
+        NOM_COLLECTION_FICHIERS_REP,
+        vec!(
+            ChampIndex {nom_champ: String::from("path_cuuids.0"), direction: 1},
+        ),
+        Some(IndexOptions { nom_index: Some("path_cuuids_0".to_string()), unique: false })
+    ).await?;
+
     db.create_index(
         NOM_COLLECTION_FICHIERS_REP,
         vec!(
