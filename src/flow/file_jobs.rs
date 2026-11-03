@@ -1149,18 +1149,20 @@ async fn create_missing_jobs_media<M>(
 
             if batch.len() >= 50 {
                 // Save batch to database
-                debug!("Saving batch of media jobs");
+                let tuuids: Vec<&String> = batch.iter().map(|f| &f.tuuid).collect();
+                debug!("Saving batch of media jobs for tuuids: {:?}", tuuids);
                 collection_jobs.insert_many(&batch).await?;
                 batch.clear();
             }
         }
+    }
 
-        if batch.len() > 0 {
-            // Save batch to database
-            debug!("Saving last batch of media jobs");
-            collection_jobs.insert_many(&batch).await?;
-            batch.clear();
-        }
+    if batch.len() > 0 {
+        // Save batch to database
+        let tuuids: Vec<&String> = batch.iter().map(|f| &f.tuuid).collect();
+        debug!("Saving last batch of media jobs for tuuids: {:?}", tuuids);
+        collection_jobs.insert_many(&batch).await?;
+        batch.clear();
     }
 
     Ok(())
