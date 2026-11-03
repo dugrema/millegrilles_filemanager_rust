@@ -1054,11 +1054,16 @@ async fn create_missing_jobs_media<M>(
         let visites: Vec<&String> = fichier_version.visites.keys().collect();
 
         // Ensure the "nouveau" visit is not counted
-        let visites = visites
+        let visites: Vec<&str> = visites
             .into_iter()
             .filter(|v| v.as_str() != "nouveau")  // New just created file, assume not ready
             .map(|v| v.as_str())
             .collect();
+
+        if visites.is_empty() {
+            // File is not available anywhere, skip
+            continue
+        }
 
         for fichier_rep in row.fichierreps {
             let tuuid = fichier_rep.tuuid.as_str();
