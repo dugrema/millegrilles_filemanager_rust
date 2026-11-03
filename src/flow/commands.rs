@@ -144,7 +144,7 @@ async fn command_lease_files_for_summary<M>(
 
     let request: RequestLeaseForBatchOperation = wrapper.message.deserialize()?;
 
-    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_SOLR_RELAI.to_string()])? {
+    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_OLLAMA_RELAI.to_string()])? {
         return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
     }
 
