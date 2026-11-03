@@ -1215,6 +1215,8 @@ async fn file_summary(
 
     let created = bson::datetime::DateTime::from_chrono(wrapper.message.estampille.clone());
 
+    let must_reindex = transaction.comment.is_some();
+
     if let Some(comment) = transaction.comment {
         let collection_comments = mongo.get_collection(NOM_COLLECTION_FILE_COMMENTS)?;
         // Insert
@@ -1259,8 +1261,13 @@ async fn file_summary(
 
     // Set summary flag to true, reset index flag for reindexing with updated content.
     let filter = doc!{ FIELD_TUUID: &transaction.tuuid };
+    let mut set_ops = doc! { CHAMP_FLAG_SUMMARY: true };
+    if must_reindex {
+        // Reset the index flag to update the search index
+        set_ops.insert(CHAMP_FLAG_INDEX, false);
+    }
     let ops = doc!{
-        "$set": { CHAMP_FLAG_SUMMARY: true, CHAMP_FLAG_INDEX: false },
+        "$set": set_ops,
         "$currentDate": { FIELD_DATE_MODIFIED: true }
     };
     let collection_reps = mongo.get_collection(NOM_COLLECTION_FICHIERS_REP)?;
