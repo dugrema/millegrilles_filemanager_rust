@@ -657,27 +657,36 @@ async fn delete_video_job<M>(
 ) -> Result<(), CommonError> where M: MongoDaoTyped {
     let command: TransactionSupprimerJobVideoV2 = wrapper.message.deserialize()?;
 
-    let user_id = match wrapper.certificate.get_user_id()? {
-        Some(user_id) => user_id,
-        None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
-    };
-    if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
-        return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+    // Not a user certificate
+    let filter = if wrapper.certificate.verifier_exchanges(vec![Securite::L2Prive])? &&
+        wrapper.certificate.verifier_roles_string(vec![ROLE_MEDIA.to_string()])?
+    {
+        // This is a job being cancelled by the media component, likely unsupported video format
+        doc!{ "job_id": &command.job_id }
+    } else {
+        // Ensure this is a user certificate
+        let user_id = match wrapper.certificate.get_user_id()? {
+            Some(user_id) => user_id,
+            None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "No user ID in certificate")).await
+        };
+        if ! wrapper.certificate.verifier_roles_string(vec![ROLE_USAGER.to_string()])? {
+            return outbound.respond(wrapper.delivery_info, ErrorMessage::err_code(401, "Access denied")).await
+        };
+        doc!{ "job_id": &command.job_id, FIELD_USER_ID: &user_id }
     };
 
     {
         // Re-emit the command as event to cancel execution
         let routage = RoutageMessageAction::builder(
-            DOMAIN_NAME, EVENEMENT_ANNULER_JOB_VIDEO, vec![Securite::L3Protege])
-            .build();
+            DOMAIN_NAME, EVENEMENT_ANNULER_JOB_VIDEO, vec![Securite::L3Protege]
+        ).build();
         outbound.emit_event(routage, &command).await?;
     }
 
     // Determiner si la job est active et pour le video initial (params.defaults == 'true')
     let collection = mongo.get_collection_typed::<BackgroundJob>(NOM_COLLECTION_VIDEO_JOBS)?;
-    let filtre = doc!{ "job_id": &command.job_id, FIELD_USER_ID: &user_id };
     let delivery_info = wrapper.delivery_info.clone();
-    if let Some(job) = collection.find_one(filtre).await? {
+    if let Some(job) = collection.find_one(filter).await? {
         let initial = match job.params {
             Some(inner) => inner.defaults.unwrap_or(false),
             None => false
