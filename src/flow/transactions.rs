@@ -102,6 +102,7 @@ impl TransactionRouter for FileManagerTransactionRouter {
 
             // Media - internal only (no command)
             TRANSACTION_ASSOCIER_CONVERSIONS_V2 => associate_file_conversions(self.mongo.as_ref(), wrapper, false).await,
+            TRANSACTION_SET_MEDIA_FLAGS => disable_media_flags(self.mongo.as_ref(), wrapper).await,
 
             // Sharing
             TRANSACTION_AJOUTER_CONTACT_LOCAL => share_add_contact(self.mongo.as_ref(), wrapper).await,
@@ -1840,5 +1841,44 @@ async fn permanently_delete_files(
 
     let mut aggregator = TransactionOperationAggregator::new();
     aggregator.ordered = Some(delete_models);
+    Ok(aggregator)
+}
+
+async fn disable_media_flags<M>(
+    mongo: &M,
+    wrapper: TransactionWrapper,
+) -> Result<TransactionOperationAggregator, CommonError> where M: MongoDaoTyped {
+    let transaction: DisableMediaFlagsTransaction = wrapper.message.deserialize()?;
+
+    let filter = doc! { FIELD_FUUID: { "$in": transaction.fuuids } };
+
+    let mut set_ops = doc! {};
+    if let Some(value) = transaction.media {
+        set_ops.insert(CHAMP_FLAG_MEDIA_TRAITE, value);
+    }
+    if let Some(value) = transaction.video {
+        set_ops.insert(CHAMP_FLAG_VIDEO_TRAITE, value);
+    }
+
+    let mut aggregator = TransactionOperationAggregator::new();
+    let collection = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+
+    // Only apply the change if at least one flag is set
+    if ! set_ops.is_empty() {
+        let ops = doc! {
+            "$set": set_ops,
+            "$currentDate": { FIELD_DATE_MODIFIED: true }
+        };
+        aggregator.ordered = Some(vec![
+            WriteModel::UpdateMany(
+                UpdateManyModel::builder()
+                    .namespace(collection.namespace())
+                    .filter(filter)
+                    .update(ops)
+                    .build()
+            )
+        ]);
+    }
+
     Ok(aggregator)
 }

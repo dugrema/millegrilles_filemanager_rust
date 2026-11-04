@@ -16,6 +16,7 @@ pub const COMMAND_CLAIM_FILEHOST_VISITS: &str = "claimAndFilehostVisits";
 pub const TRANSACTION_NOUVELLE_VERSION_V2: &str = "nouvelleVersionV2";
 pub const TRANSACTION_NOUVELLE_COLLECTION_V2: &str = "nouvelleCollectionV2";
 pub const TRANSACTION_ASSOCIER_CONVERSIONS_V2: &str = "associerConversionsV2";
+pub const TRANSACTION_SET_MEDIA_FLAGS: &str = "setMediaFlags";
 pub const TRANSACTION_DELETE_V2: &str = "deleteV2";
 pub const TRANSACTION_DELETE_V3: &str = "deleteV3";
 pub const TRANSACTION_MOVE_V2: &str = "moveV2";

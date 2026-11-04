@@ -865,6 +865,10 @@ pub async fn maintain_file_jobs<M>(
 
     if run_impossible_jobs {
         debug!("maintain_file_jobs run_impossible_jobs");
+        if let Err(e) = expire_video_default_job(transaction, mongo).await {
+            error!("maintain_file_jobs Error processing expire_video_default_job: {:?}", e);
+        }
+
         if let Err(e) = remove_impossible_jobs(transaction, mongo, NOM_COLLECTION_VIDEO_JOBS, 1_000, "processVideo").await {
             error!("maintain_file_jobs Error processing remove_impossible_jobs: {:?}", e);
         }
@@ -1335,6 +1339,54 @@ async fn run_cleanup_leases<M>(
 
     let collection = mongo.get_collection(NOM_COLLECTION_JOBS_VERSIONS_LEASES)?;
     collection.delete_many(filtre).await?;
+
+    Ok(())
+}
+
+async fn expire_video_default_job<M>(
+    transaction: &dyn TransactionService,
+    mongo: &M,
+) -> Result<(), CommonError> where M: MongoDaoTyped {
+    debug!("Running expire_video_default_job");
+
+    // Automatic creation of low quality video + thumbnail expires after 1 day
+    let expired = Utc::now() - Duration::days(1);
+
+    let filter = doc! {
+        FIELD_DATE_CREATED: { "$lt": expired },
+        CHAMP_FLAG_VIDEO_TRAITE: false
+    };
+    let collection = mongo.get_collection_typed::<NodeFichierVersionOwned>(NOM_COLLECTION_VERSIONS)?;
+    let mut cursor = collection
+        .find(filter)
+        .limit(1000)
+        .await?;
+
+    let mut fuuids_to_set = vec![];
+    while let Some(row) = cursor.try_next().await? {
+        let row = row;
+        fuuids_to_set.push(row.fuuid);
+    }
+
+    if fuuids_to_set.is_empty() {
+        // Nothing to do
+        debug!("No videos to expire");
+        return Ok(())
+    }
+
+    debug!("Expiring {} video default jobs", fuuids_to_set.len());
+    let transaction_value = DisableMediaFlagsTransaction {
+        fuuids: fuuids_to_set,
+        media: None,
+        video: Some(true),
+    };
+
+    transaction.process_value(
+        DOMAIN_NAME,
+        TRANSACTION_SET_MEDIA_FLAGS,
+        serde_json::to_value(&transaction_value)?,
+        None
+    ).await?;
 
     Ok(())
 }

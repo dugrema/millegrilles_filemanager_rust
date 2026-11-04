@@ -566,3 +566,11 @@ pub struct PermanentlyDeleteFilesTransaction {
     pub tuuids: Vec<String>,
     pub fuuids: Option<Vec<String>>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DisableMediaFlagsTransaction {
+    pub fuuids: Vec<String>,
+    pub media: Option<bool>,
+    pub video: Option<bool>,
+}
+
