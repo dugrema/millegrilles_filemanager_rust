@@ -51,7 +51,8 @@ pub async fn process_transaction<M>(
         None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err("No action provided in transaction")).await
     };
 
-    match wrapper.message.kind {
+    let delivery_info = wrapper.delivery_info.clone();
+    let result = match wrapper.message.kind {
         MessageKind::Commande => {
             match action {
                 // Adding, updating files
@@ -66,7 +67,7 @@ pub async fn process_transaction<M>(
                 // Moving files
                 TRANSACTION_AJOUTER_FICHIERS_COLLECTION => copy_files_collections(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
                 TRANSACTION_DEPLACER_FICHIERS_COLLECTION => move_files_collections(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
-                TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound, delayed_event_emitter_service, transaction, wrapper).await,
+                TRANSACTION_SUPPRIMER_DOCUMENTS => delete_file_reps(mongo, outbound.clone(), delayed_event_emitter_service, transaction, wrapper).await,
                 TRANSACTION_RECYCLE_ITEMS_V3 | TRANSACTION_RECYCLE_ITEMS_V4 => recycle_items(mongo, outbound.as_ref(), delayed_event_emitter_service.as_ref(), transaction, wrapper).await,
 
                 // Media
@@ -91,7 +92,14 @@ pub async fn process_transaction<M>(
             }
         },
         _ => unknown(outbound.as_ref(), wrapper).await
+    };
+
+    // Ensure a response is sent
+    if result.is_err() {
+        outbound.respond(delivery_info, ErrorMessage::err_code(500, "Server error")).await.ok();
     }
+
+    result
 }
 
 async fn obsolete(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {

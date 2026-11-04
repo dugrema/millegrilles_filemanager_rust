@@ -39,7 +39,8 @@ pub async fn process_request<M>(
         None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err("No action provided in request")).await
     };
 
-    match wrapper.message.kind {
+    let delivery_info = wrapper.delivery_info.clone();
+    let result = match wrapper.message.kind {
         MessageKind::Requete => {
             match action {
                 REQUEST_SYNC_DIRECTORY => request_sync_directory(mongo, outbound, wrapper).await,
@@ -71,7 +72,14 @@ pub async fn process_request<M>(
             }
         },
         _ => unknown(outbound, wrapper).await
+    };
+
+    // Ensure a response is sent
+    if result.is_err() {
+        outbound.respond(delivery_info, ErrorMessage::err_code(500, "Server error")).await.ok();
     }
+
+    result
 }
 
 async fn obsolete(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {

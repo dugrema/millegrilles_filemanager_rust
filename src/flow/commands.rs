@@ -39,7 +39,8 @@ pub async fn process_command(
         None => return outbound.respond(wrapper.delivery_info, ErrorMessage::err("No action provided in command")).await
     };
 
-    match wrapper.message.kind {
+    let delivery_info = wrapper.delivery_info.clone();
+    let result = match wrapper.message.kind {
         MessageKind::Commande => {
             match action {
                 COMMAND_LEASE_FOR_IMAGE => command_lease_files_for_image(mongo.as_ref(), outbound.as_ref(), wrapper).await,
@@ -50,7 +51,7 @@ pub async fn process_command(
                 COMMANDE_VIDEO_TRANSCODER => video_transcoder(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMANDE_REINDEXER => reindex_files(mongo.as_ref(), outbound.as_ref(), wrapper).await,
                 COMMAND_VISITS => command_visits(mongo.as_ref(), outbound.as_ref(), wrapper).await,
-                COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound, wrapper).await,
+                COMMAND_CLAIM_ALL_FILES => command_claim_all_files(mongo, outbound.clone(), wrapper).await,
                 COMMAND_CREATE_STREAM_TOKEN => create_stream_token(mongo.as_ref(), outbound.as_ref(), wrapper).await,
 
                 // Obsolete - keeping to log applications that need to be fixed
@@ -63,7 +64,14 @@ pub async fn process_command(
             }
         },
         _ => unknown(outbound.as_ref(), wrapper).await,
+    };
+
+    // Ensure a response is sent
+    if result.is_err() {
+        outbound.respond(delivery_info, ErrorMessage::err_code(500, "Server error")).await.ok();
     }
+
+    result
 }
 
 async fn obsolete(outbound: &MessageOutboundFacade, wrapper: MessageValidated) -> Result<(), CommonError> {
