@@ -120,7 +120,7 @@ where M: MongoDaoTyped
 
     // Process the unknown visits - this empties the visites object.
     let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
-    let filtre = doc!{"visit_time": null};
+    let filtre = doc!{ "visit_time": {"$exists": false} };
     let mut cursor = collection_work.find(filtre).await?;
     let mut removed_visits = Vec::new();
     let ops = doc!{
@@ -642,7 +642,8 @@ async fn maintain_deleted_files<M>(
 }
 
 async fn remove_expired_new_file_visits<M>(mongo: &M) -> Result<(), CommonError>
-where M: MongoDaoTyped
+where
+    M: MongoDaoTyped,
 {
     let now = Utc::now();
     let delai_expiration = Duration::hours(1);
@@ -650,13 +651,13 @@ where M: MongoDaoTyped
 
     debug!("remove_expired_new_file_visits Remove new file visits (visites.nouveau, epoch {} and older)", expiration);
 
-    let filtre = doc!{
+    let filtre = doc! {
         "$or": [
             {"visites.nouveau": {"$lt": expiration}},
             {"visites.nouveau": {"$lt": expiration.timestamp()}},   // Old epoch int format (obsolete)
         ]
     };
-    let ops = doc!{
+    let ops = doc! {
         "$unset": {"visites.nouveau": true},
         "$currentDate": { FIELD_DATE_MODIFIED: true }
     };
@@ -668,6 +669,36 @@ where M: MongoDaoTyped
 }
 
 #[derive(Deserialize)]
+struct FilehostIdRow {
+    #[serde(rename="filehostIds")]
+    filehost_ids: Vec<String>
+}
+
+/// Retrieves the list of existing filehost ids in VERSION_FICHIERS
+async fn get_filehost_ids(mongo: &dyn MongoDao) -> Result<Vec<String>, CommonError> {
+    let mut filehost_id_vec = Vec::new();
+    let pipeline = vec! [
+        doc!{"$project": { "keyValuePairs": {"$objectToArray": "$visites"} } },
+        doc!{"$unwind": "$keyValuePairs"},
+        doc!{
+            "$group": {
+                "_id": null,
+                "filehostIds": {"$addToSet": "$keyValuePairs.k"}
+            }
+        },
+        doc!{"$project": { "_id": 0, "filehostIds": 1 }}
+    ];
+    let collection_versions = mongo.get_collection(NOM_COLLECTION_VERSIONS)?;
+    let mut cursor = collection_versions.aggregate(pipeline).await?;
+    if let Some(row) = cursor.next().await {
+        let row: FilehostIdRow  = bson::deserialize_from_document(row?)?;
+        filehost_id_vec.extend(row.filehost_ids);
+    }
+
+    Ok(filehost_id_vec)
+}
+
+#[derive(Deserialize)]
 struct FuuidRow { fuuid: String }
 
 async fn maintain_delete_versions_fichiers<M>(
@@ -676,17 +707,34 @@ async fn maintain_delete_versions_fichiers<M>(
 ) -> Result<(), CommonError>
 where M: MongoDaoTyped
 {
-    // Get up to 1000 fuuids that have already been deleted from filehosts
-    let filtre = doc!{
-        "$and": [
-            {"$or": [{"tuuids": []}, {"tuuids": null}]},
-            {"$or": [{"visites": {}}, {"visites": null}]},
+    // Get list of filehost ids to build the filter dates
+    let filehost_ids = get_filehost_ids(mongo).await?;
+    let visits_expiration: Vec<String> = filehost_ids.into_iter().map(|f| format!("$visites.{}", f)).collect();
+
+    let now = Utc::now();
+    let delai_expiration = Duration::days(3);
+    let expiration = bson::datetime::DateTime::from_chrono(now - delai_expiration);
+
+    let filter = doc! {
+        FIELD_TUUIDS: [],       // File must not be linked by any user (deleted by all users)
+        "$or": [
+            { "visites": {} },  // The file was never reported by any filehost (and is no longer new)
+            {
+                "$expr": {
+                    "$lt": [
+                        {"$max": visits_expiration},    // Use the most recent reported presence from any filehost
+                        expiration
+                    ]
+                }
+            }
         ]
     };
+    // debug!("maintain_delete_versions_fichiers filter: {:?}", filter);
+
     let projection = doc!{"fuuid": 1};
     let collection_versions = mongo.get_collection_typed::<FuuidRow>(NOM_COLLECTION_VERSIONS)?;
     let mut cursor = collection_versions
-        .find(filtre)
+        .find(filter)
         .projection(projection)
         .limit(1000)
         .await?;

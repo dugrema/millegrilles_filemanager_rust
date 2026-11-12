@@ -64,7 +64,7 @@ pub async fn process_ticker_job<M>(
     }
 
     if let Err(e) = maintenance_access(mongo, trigger_date).await {
-        error!("Maintenance error when processing maintain_file_jobs: {:?}", e);
+        error!("Maintenance error when processing maintenance_access: {:?}", e);
     }
 
     // Backup handling
