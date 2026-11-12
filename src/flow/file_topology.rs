@@ -26,6 +26,8 @@ use millegrilles_common_rust::v3::facades::message_outbound::MessageOutboundFaca
 use millegrilles_common_rust::{bson, serde_json};
 use std::collections::{HashMap, HashSet};
 
+const CONST_VISITS_EXPIRED_REMOVE_FILE_DAYS: i64 = 3;
+
 pub async fn maintain_visits_claims<M>(
     transaction: &dyn TransactionService,
     mongo: &M,
@@ -712,7 +714,7 @@ where M: MongoDaoTyped
     let visits_expiration: Vec<String> = filehost_ids.into_iter().map(|f| format!("$visites.{}", f)).collect();
 
     let now = Utc::now();
-    let delai_expiration = Duration::days(3);
+    let delai_expiration = Duration::days(CONST_VISITS_EXPIRED_REMOVE_FILE_DAYS);
     let expiration = bson::datetime::DateTime::from_chrono(now - delai_expiration);
 
     let filter = doc! {
